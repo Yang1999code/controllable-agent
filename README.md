@@ -88,13 +88,13 @@ pip install playwright && playwright install chromium
 - 7 基础 Hook 事件 + 异常隔离
 - CLAUDE.md 层级发现 (`~/.agent/` → 项目根 → 逐级向上)
 
-### Phase 2 — 扩展 (已实现)
+### Phase 2 — 扩展 (正在实现)
 - 能力渐进式披露 (Tier 0 始终可见, Tier 1 按需)
 - 动态 Prompt 片段组装 (优先级 0-100, token 预算裁剪)
 - 插件系统 (4 层发现: 内置→用户→项目→pip)
 - Web 工具 (fetch + search + browser navigate/click/type/snapshot)
 
-### Phase 3 — 多 Agent + 自进化 (已实现)
+### Phase 3 — 多 Agent + 自进化 (正在实现)
 - **多 Agent 运行时**: spawn 单任务 / spawn_parallel 并行 (Semaphore 并发控制)
 - **Agent 自动选择**: Overlap Coefficient 匹配, 中文分词, 阈值 0.3
 - **Agent 间通信**: asyncio.Queue 收件箱, send_message/check_inbox
