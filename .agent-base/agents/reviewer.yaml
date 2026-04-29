@@ -1,0 +1,13 @@
+category: review
+description: code review agent
+initial_prompt: ''
+max_tokens: 4096
+model: ''
+name: reviewer
+omit_context: false
+system_prompt: ''
+tools_blacklist:
+- delegate_task
+- crystallize
+tools_whitelist: []
+when_to_use: 当需要审查代码时

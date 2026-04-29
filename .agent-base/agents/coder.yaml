@@ -1,0 +1,13 @@
+category: general
+description: coding agent
+initial_prompt: ''
+max_tokens: 4096
+model: ''
+name: coder
+omit_context: false
+system_prompt: ''
+tools_blacklist:
+- delegate_task
+- crystallize
+tools_whitelist: []
+when_to_use: ''

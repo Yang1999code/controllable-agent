@@ -1,0 +1,13 @@
+category: exploration
+description: file search and exploration agent
+initial_prompt: ''
+max_tokens: 4096
+model: ''
+name: explorer
+omit_context: false
+system_prompt: ''
+tools_blacklist:
+- delegate_task
+- crystallize
+tools_whitelist: []
+when_to_use: 当需要搜索文件或探索代码库查找时

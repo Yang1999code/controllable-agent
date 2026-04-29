@@ -1,0 +1,28 @@
+agent:
+  max_turns: 100
+  max_tool_calls_per_turn: 10
+  max_context_tokens: 128000
+  max_tool_result_chars: 50000
+
+providers:
+  default: openai_compat
+  openai_compat:
+    base_url: https://api.deepseek.com/v1
+    model: deepseek-chat
+    api_key: sk-1f9046981fbc47a7890032d26159dfd4
+  anthropic:
+    model: claude-sonnet-4-6
+    api_key_env: ANTHROPIC_API_KEY
+
+tools:
+  max_concurrent_safe: 5
+  result_budget_chars: 50000
+
+hooks:
+  enabled: true
+
+runtime:
+  max_concurrent_children: 3
+  max_depth: 2
+  default_timeout_sec: 300
+  heartbeat_interval_sec: 30
