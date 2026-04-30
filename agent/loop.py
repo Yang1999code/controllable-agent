@@ -26,6 +26,8 @@ if TYPE_CHECKING:
     from agent.prompt import IPromptBuilder
     from agent.runtime import IAgentRuntime
     from agent.autonomous_memory import IAutonomousMemory
+    from agent.inspector import IFlowInspector
+    from agent.capability import ICapabilityRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +78,8 @@ class AgentLoop:
         config: AgentConfig | None = None,
         # Phase 2 依赖（初始可为 None）
         prompt_builder: "IPromptBuilder | None" = None,
+        inspector: "IFlowInspector | None" = None,
+        capability_registry: "ICapabilityRegistry | None" = None,
         # Phase 3 依赖（初始可为 None）
         runtime: "IAgentRuntime | None" = None,
         autonomous_memory: "IAutonomousMemory | None" = None,
@@ -85,6 +89,8 @@ class AgentLoop:
         self.hooks = hooks
         self.config = config or AgentConfig()
         self.prompt_builder = prompt_builder
+        self.inspector = inspector
+        self.capability_registry = capability_registry
         self.runtime = runtime
         self.autonomous_memory = autonomous_memory
 
@@ -171,10 +177,17 @@ class AgentLoop:
 
                 current_text = ""
                 current_tool_calls = []
+                llm_start = time.monotonic()
+
+                # 按 CapabilityRegistry 过滤可见工具
+                tool_defs = self.tools.get_definitions()
+                if self.capability_registry:
+                    visible_names = set(self.capability_registry.get_visible_tools())
+                    tool_defs = [d for d in tool_defs if d.name in visible_names]
 
                 async for event in self.provider.stream(
                     messages=context.messages,
-                    tools=self.tools.get_definitions(),
+                    tools=tool_defs,
                     system_prompt=context.system_prompt,
                 ):
                     if event.type == "text_delta":
@@ -241,6 +254,20 @@ class AgentLoop:
                     tool_calls=openai_tool_calls,
                 ))
 
+                # ★ 旁路监控：记录 LLM 调用
+                if self.inspector:
+                    try:
+                        llm_latency_ms = (time.monotonic() - llm_start) * 1000
+                        await self.inspector.push({
+                            "event": "llm_call",
+                            "latency_ms": llm_latency_ms,
+                            "input_tokens": total_input_tokens,
+                            "output_tokens": total_output_tokens,
+                            "tool_calls": len(current_tool_calls),
+                        })
+                    except Exception:
+                        pass
+
                 # 执行工具
                 results = await self.tools.execute_many(current_tool_calls, context)
 
@@ -268,6 +295,18 @@ class AgentLoop:
                 type=AgentEventType.TURN_END,
                 data={"turn": turn_count, "tool_calls": tool_call_count},
             ))
+
+            # ★ 旁路监控：记录轮次结束
+            if self.inspector:
+                try:
+                    await self.inspector.push({
+                        "event": "turn_end",
+                        "turn": turn_count,
+                        "tool_calls": tool_call_count,
+                        "success": True,
+                    })
+                except Exception:
+                    pass
 
             # ★ Phase 3：update_working_checkpoint（每轮）
             if self.autonomous_memory:

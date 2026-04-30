@@ -203,7 +203,7 @@ class OpenAICompatibleProvider(IModelProvider):
                         )
                         return
 
-                    current_tool_call: dict | None = None
+                    current_tool_calls: dict[int, dict] = {}
                     async for line in response.aiter_lines():
                         if not line.startswith("data: "):
                             continue
@@ -224,25 +224,25 @@ class OpenAICompatibleProvider(IModelProvider):
                         if delta.get("content"):
                             yield LLMEvent(type="text_delta", content=delta["content"])
 
-                        # 工具调用
-                        tc = delta.get("tool_calls")
-                        if tc:
-                            tc0 = tc[0]
+                        # 工具调用（支持多个 tool call 交错流式传输）
+                        tc_list = delta.get("tool_calls")
+                        if tc_list:
+                            tc0 = tc_list[0]
                             idx = tc0.get("index", 0)
-                            if idx == 0 and current_tool_call is None:
-                                current_tool_call = {
+                            if idx not in current_tool_calls:
+                                current_tool_calls[idx] = {
                                     "tool_name": tc0.get("function", {}).get("name", ""),
                                     "tool_id": tc0.get("id", ""),
                                     "args": "",
                                 }
                                 yield LLMEvent(
                                     type="tool_call",
-                                    tool_name=current_tool_call["tool_name"],
-                                    tool_id=current_tool_call["tool_id"],
+                                    tool_name=current_tool_calls[idx]["tool_name"],
+                                    tool_id=current_tool_calls[idx]["tool_id"],
                                 )
-                            if current_tool_call and tc0.get("function", {}).get("arguments"):
+                            if tc0.get("function", {}).get("arguments"):
                                 chunk_args = tc0["function"]["arguments"]
-                                current_tool_call["args"] += chunk_args
+                                current_tool_calls[idx]["args"] += chunk_args
                                 yield LLMEvent(
                                     type="tool_call_args",
                                     content=chunk_args,
@@ -276,6 +276,12 @@ class OpenAICompatibleProvider(IModelProvider):
         async for event in self.stream(messages, tools, system_prompt, max_tokens):
             results.append(event)
         return results
+
+    async def close(self) -> None:
+        """关闭 HTTP 客户端，释放连接。"""
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     def count_tokens(self, text: str) -> int:
         # 粗略：英文 1 token ≈ 3.5 字符，中文 1 token ≈ 2 字符
@@ -330,13 +336,25 @@ class AnthropicProvider(IModelProvider):
                 if not system_prompt:
                     system_prompt = m.content
                 continue
-            entry: dict = {"role": m.role, "content": m.content}
             if m.tool_call_id:
-                entry["content"] = [
-                    {"type": "tool_result", "tool_use_id": m.tool_call_id, "content": m.content}
-                ]
-                entry.pop("content", None)
-            anthropic_msgs.append(entry)
+                anthropic_msgs.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": m.tool_call_id, "content": m.content}
+                    ],
+                })
+            elif m.tool_calls:
+                content_blocks = []
+                if m.content:
+                    content_blocks.append({"type": "text", "text": m.content})
+                content_blocks.extend([
+                    {"type": "tool_use", "id": tc["id"], "name": tc["function"]["name"],
+                     "input": json.loads(tc["function"]["arguments"])}
+                    for tc in m.tool_calls
+                ])
+                anthropic_msgs.append({"role": "assistant", "content": content_blocks})
+            else:
+                anthropic_msgs.append({"role": m.role, "content": m.content})
 
         # Anthropic 工具格式
         anthropic_tools = []
@@ -363,7 +381,7 @@ class AnthropicProvider(IModelProvider):
                     temperature=temperature,
                     system=system_prompt,
                     messages=anthropic_msgs,
-                    tools=anthropic_tools if anthropic_tools else anthropic.not_given,
+                    tools=anthropic_tools or None,
                 ) as stream:
                     async for event in stream:
                         if event.type == "content_block_start":

@@ -43,10 +43,10 @@ class IAutonomousMemory(ABC):
     """
 
     @abstractmethod
-    def update_working_checkpoint(self, key_info: str, related_sop: str = "",
+    async def update_working_checkpoint(self, key_info: str, related_sop: str = "",
                                   project: str = "default") -> None: ...
     @abstractmethod
-    def get_working_checkpoint(self, project: str = "default") -> dict: ...
+    async def get_working_checkpoint(self, project: str = "default") -> dict: ...
     @abstractmethod
     def should_crystallize(self, task_result: dict) -> bool: ...
     @abstractmethod
@@ -59,7 +59,7 @@ class IAutonomousMemory(ABC):
     async def start_long_term_update(self, session_summary: dict,
                                      project: str = "default") -> None: ...
     @abstractmethod
-    def get_crystallized_skill(self, name: str, project: str = "default") -> SkillCard | None: ...
+    async def get_crystallized_skill(self, name: str, project: str = "default") -> SkillCard | None: ...
 
 
 # ── 实现 ──────────────────────────────────────────────
@@ -225,15 +225,11 @@ Tool trace: {result.tool_trace}
 
     # ── 技能查询 ──
 
-    def get_crystallized_skill(self, name: str,
+    async def get_crystallized_skill(self, name: str,
                                 project: str = "default") -> SkillCard | None:
         """按名称查询已结晶技能。"""
-        import asyncio
         skill_path = f"{self._skills_dir.format(project=project)}/{name}.yaml"
-        try:
-            content = asyncio.run(self.store.read(skill_path))
-        except RuntimeError:
-            return None
+        content = await self.store.read(skill_path)
         if content:
             data = yaml.safe_load(content)
             if data:

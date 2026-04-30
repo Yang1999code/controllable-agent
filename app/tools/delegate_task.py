@@ -50,7 +50,11 @@ class DelegateTaskTool:
             result = await runtime.spawn(
                 agent_type=agent_type,
                 task=task,
-                context={"metadata": context.metadata},
+                context={
+                    "agent_id": context.metadata.get("agent_id", "main"),
+                    "parent_messages": context.metadata.get("parent_messages", []),
+                    "project_path": context.metadata.get("project_path", "."),
+                },
             )
             return ToolResult(
                 tool_name="delegate_task", success=True,

@@ -15,10 +15,14 @@ import logging
 import sys
 
 from ai.types import Context, Message
-from ai.provider import IModelProvider, OpenAICompatibleProvider, AnthropicProvider
 from agent.tool_registry import ToolRegistry
 from agent.hook import HookChain
 from agent.loop import AgentLoop, AgentConfig
+from agent.inspector import FlowInspector
+from agent.prompt import PromptBuilder
+from agent.capability import CapabilityCatalog, CapabilityRegistry
+from agent.skill import SkillRegistry
+from app.providers import create_provider
 from app.tools import register_all_tools
 from app.config.loader import load_config, get_provider_config
 from app.tui import TuiSession
@@ -33,20 +37,6 @@ def _safe_print(text: str) -> None:
     except UnicodeEncodeError:
         print(text.encode(sys.stdout.encoding or "utf-8", errors="replace")
                   .decode(sys.stdout.encoding or "utf-8", errors="replace"))
-
-
-def _create_provider(provider_type: str, model: str, api_key: str,
-                    base_url: str = "") -> IModelProvider:
-    """工厂函数：根据类型创建模型提供商。"""
-    if provider_type == "openai_compat":
-        kwargs = {"model": model, "api_key": api_key}
-        if base_url:
-            kwargs["base_url"] = base_url
-        return OpenAICompatibleProvider(**kwargs)
-    elif provider_type == "anthropic":
-        return AnthropicProvider(model=model, api_key=api_key)
-    else:
-        raise ValueError(f"Unknown provider type: {provider_type}")
 
 
 def _setup_logging(verbose: bool = False):
@@ -114,13 +104,67 @@ async def main():
     base_url = provider_cfg.get("base_url", "")
     api_key = args.api_key or provider_cfg.get("api_key", "")
     provider_type = args.provider or config.get("providers", {}).get("default", "openai_compat")
-    provider = _create_provider(provider_type, model, api_key, base_url)
+    provider_kwargs = {"model": model, "api_key": api_key}
+    if base_url:
+        provider_kwargs["base_url"] = base_url
+    provider = create_provider(provider_type, **provider_kwargs)
 
     tools = ToolRegistry()
     tools.max_result_chars = agent_cfg.get("max_tool_result_chars", 50000)
     register_all_tools(tools)
 
     hooks = HookChain()
+
+    # ── Phase 2/3 模块装配 ──────────────────────────────
+    # SkillRegistry — 技能注册表
+    skill_registry = SkillRegistry()
+
+    # Capability 渐进式披露 — 标记各工具的 Tier
+    catalog = CapabilityCatalog()
+    capability_registry = CapabilityRegistry(catalog)
+    capability_registry.register_capability(
+        "file_ops", "文件读写编辑", tier=0, source="builtin",
+        tools=["read", "write", "edit"],
+    )
+    capability_registry.register_capability(
+        "shell", "Shell 命令执行", tier=0, source="builtin",
+        tools=["bash"],
+    )
+    capability_registry.register_capability(
+        "search", "文件搜索 (glob/grep)", tier=0, source="builtin",
+        tools=["glob", "grep"],
+    )
+    capability_registry.register_capability(
+        "web", "网页抓取/搜索/浏览器", tier=1, source="builtin",
+        tools=["web_fetch", "web_search", "web_browser_navigate",
+               "web_browser_click", "web_browser_type", "web_browser_snapshot"],
+    )
+    capability_registry.register_capability(
+        "delegation", "多 Agent 委托与通信", tier=1, source="builtin",
+        tools=["delegate_task", "agent_message"],
+    )
+
+    # PromptBuilder — 动态 prompt 片段组装
+    prompt_builder = PromptBuilder()
+
+    # FlowInspector — 旁路运行监控
+    inspector = FlowInspector()
+
+    # WebAutomation — 网页工具后端
+    web: object | None = None
+    try:
+        from agent.web import WebAutomation
+        _wa = WebAutomation()
+        web = _wa
+    except Exception:
+        pass
+
+    # PluginAdapter — 4 层插件发现
+    try:
+        from agent.plugin import PluginAdapter
+        plugin_adapter = PluginAdapter(hooks, tools, skill_registry, catalog)
+    except Exception:
+        plugin_adapter = None
 
     loop_config = AgentConfig(
         max_turns=agent_cfg.get("max_turns", 100),
@@ -133,6 +177,9 @@ async def main():
         tools=tools,
         hooks=hooks,
         config=loop_config,
+        prompt_builder=prompt_builder,
+        inspector=inspector,
+        capability_registry=capability_registry,
     )
 
     context = Context(
@@ -146,7 +193,11 @@ async def main():
             f"你支持流式响应、工具调用、自动记忆管理。"
             f"请用中文回答用户的问题。当被问到你的身份时，如实说明你是 my-agent 框架，运行在 {model} 模型上。"
         ),
-        metadata={"project_path": "."},
+        metadata={
+            "project_path": ".",
+            "_web": web,
+            "_skill_registry": skill_registry,
+        },
     )
 
     # 执行

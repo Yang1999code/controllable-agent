@@ -219,6 +219,14 @@ class WebAutomation(IWebAutomation):
             "url_blacklist": self._url_blacklist,
         }
 
+    async def close(self) -> None:
+        """关闭 HTTP 客户端，释放连接。"""
+        if self._http_client is not None:
+            await self._http_client.aclose()
+            self._http_client = None
+        for session_id in list(self._browser_sessions.keys()):
+            await self.browser_close(session_id)
+
     def _is_blacklisted(self, url: str) -> bool:
         """检查 URL 是否在黑名单中。"""
         for blocked in self._url_blacklist:
