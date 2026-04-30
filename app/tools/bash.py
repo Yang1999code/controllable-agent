@@ -2,10 +2,11 @@
 
 异步执行 shell 命令，超时 120s，返回 stdout+stderr+exit_code。
 is_concurrency_safe=False —— 多个 shell 并行会冲突。
+
+跨平台：Windows 自动使用 cmd.exe，Linux/macOS 使用 bash。
 """
 
 import asyncio
-import shutil
 from pathlib import Path
 
 from ai.types import Context, ToolDefinition, ToolParameter, ToolResult
@@ -14,7 +15,10 @@ from ai.types import Context, ToolDefinition, ToolParameter, ToolResult
 class BashTool:
     definition = ToolDefinition(
         name="bash",
-        description="执行 shell 命令。返回 stdout、stderr 和退出码。",
+        description=(
+            "执行 shell 命令。返回 stdout、stderr 和退出码。"
+            "Windows 上使用 cmd.exe，Linux/macOS 上使用 bash。"
+        ),
         parameters=[
             ToolParameter(name="command", type="string",
                           description="要执行的 shell 命令", required=True),
@@ -30,13 +34,6 @@ class BashTool:
         command = args["command"]
         timeout = int(args.get("timeout", 120))
         workdir = args.get("workdir", "")
-
-        # 安全检查：确保 shell 可用
-        if not shutil.which("bash") and not shutil.which("sh"):
-            return ToolResult(
-                tool_name="bash", success=False,
-                error="未找到 bash/sh",
-            )
 
         try:
             cwd = str(Path(workdir).resolve()) if workdir else None
@@ -63,6 +60,7 @@ class BashTool:
             return ToolResult(
                 tool_name="bash", success=proc.returncode == 0,
                 content="\n".join(output_parts) or "(空输出)",
+                error=None if proc.returncode == 0 else f"命令退出码: {proc.returncode}",
             )
         except asyncio.TimeoutError:
             return ToolResult(
