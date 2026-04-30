@@ -121,3 +121,18 @@ class AgentEvent:
     type: AgentEventType
     data: dict = field(default_factory=dict)
     timestamp: float = 0.0
+
+
+# ── UI 解耦 ───────────────────────────────────────────
+
+@runtime_checkable
+class IUiSession(Protocol):
+    """UI 会话抽象。
+
+    CLI 只依赖这个 Protocol，不依赖具体前端实现（TUI/Web/API）。
+    参考 OpenAI Agents SDK：Runner 不关心前端，只通过 result.stream_events() 返回事件流。
+    """
+
+    async def run(self) -> None:
+        """启动 UI 会话循环。"""
+        ...

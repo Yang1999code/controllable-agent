@@ -8,13 +8,15 @@ Scrollback 模式：
 - prompt_toolkit 处理底部输入行
 - 无 alt screen 切换，无清屏操作
 
+斜杠命令通过 COMMANDS 注册表管理，插件可通过 register_command 装饰器扩展。
+
 参考：CCB scrollback 模式 / OpenCode session 视图。
 """
 
 import asyncio
 import logging
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from app.tui.display import (
     RESET, BOLD, DIM,
@@ -35,12 +37,25 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# ── 命令注册表 ──────────────────────────────────────────
+
+COMMANDS: dict[str, tuple[str, Callable]] = {}
+"""斜杠命令注册表：{命令名: (描述, async_handler)}。插件可通过 register_command 扩展。"""
+
+
+def register_command(name: str, description: str):
+    """装饰器：注册斜杠命令到全局命令表。"""
+    def decorator(func):
+        COMMANDS[name] = (description, func)
+        return func
+    return decorator
+
 
 class TuiSession:
     """TUI 会话（Scrollback 模式）。
 
     所有消息累积在终端滚动缓冲区中，quit 后仍可回看。
-    与核心代码完全解耦，仅使用 AgentLoop.run() 公共 API。
+    通过 AgentLoop 公共属性获取状态，不穿透内部实现。
     """
 
     def __init__(self, loop: "AgentLoop", context: "Context"):
@@ -50,7 +65,6 @@ class TuiSession:
         self._turns = 0
         self._total_itokens = 0
         self._total_otokens = 0
-        self._model = getattr(loop.provider, "model", "unknown")
         self._running = True
 
     # ── 公共入口 ────────────────────────────────────────
@@ -156,7 +170,7 @@ class TuiSession:
                 context_pct = (self._total_itokens / max_ctx) * 100
         self._println(_divider("-"))
         self._println(format_status_line(
-            self._model, self._turns,
+            self._loop.model_name, self._turns,
             self._total_itokens, self._total_otokens,
             context_pct,
         ))
@@ -170,8 +184,8 @@ class TuiSession:
 +{'=' * 50}+{RESET}
 """
         self._println(logo)
-        self._println(f"  {DIM}底层模型:{RESET} {self._model}")
-        self._println(f"  {DIM}可用工具:{RESET} {len(self._loop.tools.tools)} 个")
+        self._println(f"  {DIM}底层模型:{RESET} {self._loop.model_name}")
+        self._println(f"  {DIM}可用工具:{RESET} {self._loop.tool_count} 个")
         self._println(f"  {DIM}/help 命令 | /flowchart 流程图 | /fcd 浏览器详情 | /exit 退出{RESET}")
         self._println()
 
@@ -196,65 +210,88 @@ class TuiSession:
     # ── 斜杠命令 ────────────────────────────────────────
 
     async def _handle_command(self, text: str) -> bool:
-        """处理斜杠命令。返回 True 表示已处理。"""
+        """处理斜杠命令。返回 True 表示已处理。
+
+        优先查 COMMANDS 注册表，其次处理内置退出命令。
+        插件可通过 register_command 装饰器扩展命令表。
+        """
         parts = text.strip().split()
         cmd = parts[0].lower() if parts else ""
 
+        # 内置退出命令（不可覆盖）
         if cmd in ("/exit", "/quit", "/q"):
             self._running = False
             return True
 
-        if cmd in ("/help", "/h"):
-            self._println()
-            self._println(f"{BOLD}可用命令:{RESET}")
-            self._println(f"  {CYAN}/exit{RESET}, {CYAN}/quit{RESET}  — 退出")
-            self._println(f"  {CYAN}/flowchart{RESET}     — 查看控制流程图")
-            self._println(f"  {CYAN}/fcd{RESET}           — 浏览器打开流程图详解")
-            self._println(f"  {CYAN}/clear{RESET}         — 清屏")
-            self._println(f"  {CYAN}/model{RESET}         — 显示当前模型")
-            self._println(f"  {CYAN}/tools{RESET}         — 列出所有工具")
-            self._println(f"  {CYAN}/tokens{RESET}        — 显示 Token 统计")
-            self._println(f"  {CYAN}/help{RESET}          — 显示此帮助")
-            self._println()
-            self._println(f"{DIM}提示：Enter 提交，Esc+Enter 换行，Ctrl+C/D 退出{RESET}")
-            self._println()
+        # 从注册表查找
+        if cmd in COMMANDS:
+            _, handler = COMMANDS[cmd]
+            await handler(self)
             return True
 
-        if cmd in ("/fcd", "/fco"):
-            self._open_flowchart_detail()
-            return True
-
-        if cmd in ("/flowchart", "/flow", "/fc"):
-            await self._show_flowchart()
-            return True
-
-        if cmd == "/clear":
-            self._println("\n" * (_term_width() or 80))
-            return True
-
-        if cmd == "/model":
-            self._println(f"  {DIM}当前模型:{RESET} {BOLD}{self._model}{RESET}")
-            self._println()
-            return True
-
-        if cmd == "/tools":
-            self._println(f"  {BOLD}已注册工具 ({len(self._loop.tools.tools)}):{RESET}")
-            for name, tool in sorted(self._loop.tools.tools.items()):
-                desc = getattr(tool.definition, "description", "") if hasattr(tool, "definition") else ""
-                if len(desc) > 60:
-                    desc = desc[:57] + "..."
-                self._println(f"  {CYAN}{name:<25}{RESET} {DIM}{desc}{RESET}")
-            self._println()
-            return True
-
-        if cmd == "/tokens":
-            self._println(f"  {DIM}累计 Token 使用:{RESET}")
-            self._println(f"  {BRIGHT_GREEN}输入:{RESET} {self._total_itokens}")
-            self._println(f"  {BRIGHT_BLUE}输出:{RESET} {self._total_otokens}")
-            self._println(f"  {YELLOW}合计:{RESET} {self._total_itokens + self._total_otokens}")
-            self._println()
+        # 别名映射
+        ALIASES = {"/fc": "/flowchart", "/flow": "/flowchart",
+                    "/fcd": "/fco", "/h": "/help"}
+        resolved = ALIASES.get(cmd)
+        if resolved and resolved in COMMANDS:
+            _, handler = COMMANDS[resolved]
+            await handler(self)
             return True
 
         self._println(f"  {YELLOW}未知命令: {cmd}{RESET} (输入 /help 查看可用命令)")
         self._println()
         return True
+
+
+# ── 内置斜杠命令（装饰器注册，插件可扩展）─────────────────
+
+@register_command("/help", "显示帮助")
+async def _cmd_help(session: TuiSession):
+    session._println()
+    session._println(f"{BOLD}可用命令:{RESET}")
+    for name, (desc, _) in sorted(COMMANDS.items()):
+        session._println(f"  {CYAN}{name:<16}{RESET} — {desc}")
+    session._println()
+    session._println(f"{DIM}提示：Enter 提交，Esc+Enter 换行，Ctrl+C/D 退出{RESET}")
+    session._println()
+
+
+@register_command("/flowchart", "查看控制流程图")
+async def _cmd_flowchart(session: TuiSession):
+    await session._show_flowchart()
+
+
+@register_command("/fco", "浏览器打开流程图详解")
+async def _cmd_fco(session: TuiSession):
+    session._open_flowchart_detail()
+
+
+@register_command("/clear", "清屏")
+async def _cmd_clear(session: TuiSession):
+    session._println("\n" * (_term_width() or 80))
+
+
+@register_command("/model", "显示当前模型")
+async def _cmd_model(session: TuiSession):
+    session._println(f"  {DIM}当前模型:{RESET} {BOLD}{session._loop.model_name}{RESET}")
+    session._println()
+
+
+@register_command("/tools", "列出所有工具")
+async def _cmd_tools(session: TuiSession):
+    session._println(f"  {BOLD}已注册工具 ({session._loop.tool_count}):{RESET}")
+    for name, tool in sorted(session._loop.tools.tools.items()):
+        desc = getattr(tool.definition, "description", "") if hasattr(tool, "definition") else ""
+        if len(desc) > 60:
+            desc = desc[:57] + "..."
+        session._println(f"  {CYAN}{name:<25}{RESET} {DIM}{desc}{RESET}")
+    session._println()
+
+
+@register_command("/tokens", "显示 Token 统计")
+async def _cmd_tokens(session: TuiSession):
+    session._println(f"  {DIM}累计 Token 使用:{RESET}")
+    session._println(f"  {BRIGHT_GREEN}输入:{RESET} {session._total_itokens}")
+    session._println(f"  {BRIGHT_BLUE}输出:{RESET} {session._total_otokens}")
+    session._println(f"  {YELLOW}合计:{RESET} {session._total_itokens + session._total_otokens}")
+    session._println()

@@ -14,14 +14,15 @@ import asyncio
 import logging
 import sys
 
-from ai.types import Context, Message
-from agent.tool_registry import ToolRegistry
-from agent.hook import HookChain
-from agent.loop import AgentLoop, AgentConfig
-from agent.inspector import FlowInspector
-from agent.prompt import PromptBuilder
-from agent.capability import CapabilityCatalog, CapabilityRegistry
-from agent.skill import SkillRegistry
+from my_agent import (
+    Context, Message,
+    ToolRegistry, HookChain,
+    AgentLoop, AgentConfig,
+    FlowInspector, PromptBuilder,
+    CapabilityCatalog, CapabilityRegistry,
+    SkillRegistry, IUiSession,
+    MCPServerConfig, MCPClient,
+)
 from app.providers import create_provider
 from app.tools import register_all_tools
 from app.config.loader import load_config, get_provider_config
@@ -50,8 +51,8 @@ def _setup_logging(verbose: bool = False):
 async def run_legacy_repl(loop: AgentLoop, context: Context):
     """旧版 REPL 交互循环（--legacy 可用）。"""
     print("my-agent REPL. 输入消息，输入 'exit' 或 'quit' 退出。")
-    print(f"模型: {loop.provider.model if hasattr(loop.provider, 'model') else 'unknown'}")
-    print(f"工具数: {len(loop.tools.tools)}")
+    print(f"模型: {loop.model_name}")
+    print(f"工具数: {loop.tool_count}")
     print()
 
     while True:
@@ -114,6 +115,35 @@ async def main():
     register_all_tools(tools)
 
     hooks = HookChain()
+
+    # ── MCP Server 连接 ──────────────────────────────────
+    mcp_clients: list[MCPClient] = []
+    mcp_servers = config.get("mcp_servers", [])
+    if mcp_servers:
+        for srv in mcp_servers:
+            if not isinstance(srv, dict):
+                continue
+            if srv.get("disabled"):
+                continue
+            try:
+                mcp_config = MCPServerConfig(
+                    name=srv.get("name", "unnamed"),
+                    transport=srv.get("transport", "stdio"),
+                    command=srv.get("command", ""),
+                    args=srv.get("args", []),
+                    url=srv.get("url", ""),
+                    env=srv.get("env", {}),
+                )
+                mcp_client = MCPClient(mcp_config)
+                await mcp_client.connect()
+                for adapter in mcp_client.create_adapters():
+                    tools.register(adapter)
+                mcp_clients.append(mcp_client)
+                _safe_print(f"[MCP] {mcp_config.name}: {len(mcp_client.tool_names)} tools")
+            except ImportError:
+                _safe_print(f"[MCP] {srv.get('name', '?')}: skipped (mcp package not installed)")
+            except Exception as e:
+                _safe_print(f"[MCP] {srv.get('name', '?')}: error — {e}")
 
     # ── Phase 2/3 模块装配 ──────────────────────────────
     # SkillRegistry — 技能注册表
@@ -201,20 +231,28 @@ async def main():
     )
 
     # 执行
-    if args.one_shot:
-        result = await loop.run(args.one_shot, context)
-        if result.final_output:
-            _safe_print(result.final_output)
-        elif result.messages:
-            for msg in result.messages:
-                if msg.role == "assistant":
-                    _safe_print(msg.content[:2000] if msg.content else "(tool calls only)")
-    elif args.legacy:
-        await run_legacy_repl(loop, context)
-    else:
-        # 默认：TUI 交互模式
-        session = TuiSession(loop, context)
-        await session.run()
+    try:
+        if args.one_shot:
+            result = await loop.run(args.one_shot, context)
+            if result.final_output:
+                _safe_print(result.final_output)
+            elif result.messages:
+                for msg in result.messages:
+                    if msg.role == "assistant":
+                        _safe_print(msg.content[:2000] if msg.content else "(tool calls only)")
+        elif args.legacy:
+            await run_legacy_repl(loop, context)
+        else:
+            # 默认：TUI 交互模式
+            session: IUiSession = TuiSession(loop, context)
+            await session.run()
+    finally:
+        # 清理 MCP 连接
+        for client in mcp_clients:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

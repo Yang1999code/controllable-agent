@@ -94,6 +94,16 @@ class AgentLoop:
         self.runtime = runtime
         self.autonomous_memory = autonomous_memory
 
+    # ── 公共属性（供前端使用，不穿透内部）───────────────
+
+    @property
+    def model_name(self) -> str:
+        return getattr(self.provider, "model", "unknown")
+
+    @property
+    def tool_count(self) -> int:
+        return len(self.tools.tools)
+
     async def run(self, user_input: str, context: Context) -> AgentResult:
         """主入口。"""
         turn_count = 0
