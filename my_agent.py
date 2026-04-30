@@ -37,6 +37,13 @@ from agent.memory.store import MemoryStore
 from agent.memory.backend import FileSystemMemoryBackend, IMemoryBackend
 from agent.memory.index import MemoryIndex
 
+# ── 上下文管理 ─────────────────────────────────────────
+from agent.context_window import (
+    estimate_tokens, count_total_tokens, is_overflow,
+)
+from agent.cache_break import CacheBreakDetector
+from agent.compaction import compact, CompactionResult
+
 # ── UI 解耦 Protocol ───────────────────────────────────
 from ai.types import IUiSession
 
@@ -64,4 +71,7 @@ __all__ = [
     "ISkill", "ISkillConfig",
     # memory
     "MemoryStore", "FileSystemMemoryBackend", "IMemoryBackend", "MemoryIndex",
+    # context management
+    "estimate_tokens", "count_total_tokens", "is_overflow",
+    "CacheBreakDetector", "compact", "CompactionResult",
 ]

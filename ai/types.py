@@ -20,6 +20,8 @@ class Message:
 
     role: str  # "system" | "user" | "assistant" | "tool"
     content: str
+    id: str = ""
+    summary: bool = False
     tool_call_id: str | None = None
     tool_name: str | None = None
     tool_calls: list[dict] | None = None  # assistant 消息中的 tool_calls（OpenAI 格式）
@@ -112,6 +114,8 @@ class AgentEventType(Enum):
     # Phase 3（需求4）
     SUBAGENT_START = "subagent_start"
     SUBAGENT_STOP = "subagent_stop"
+    # 上下文管理
+    CONTEXT_COMPACTION = "context_compaction"
 
 
 @dataclass

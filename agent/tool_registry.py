@@ -25,6 +25,8 @@ class ToolRegistry:
 
     tools: dict[str, ITool] = field(default_factory=dict)
     max_result_chars: int = 50000
+    _defs_dirty: bool = True
+    _defs_cache: list[ToolDefinition] = field(default_factory=list)
 
     # ── 注册 ──
 
@@ -33,13 +35,22 @@ class ToolRegistry:
         if not tool.definition.name:
             raise ValueError("Tool name cannot be empty")
         self.tools[tool.definition.name] = tool
+        self._defs_dirty = True
 
     def unregister(self, name: str) -> None:
-        self.tools.pop(name, None)
+        if name in self.tools:
+            self.tools.pop(name)
+            self._defs_dirty = True
 
     def get_definitions(self) -> list[ToolDefinition]:
-        """获取所有工具的 JSON Schema 列表（发给 LLM）。"""
-        return [t.definition for t in self.tools.values()]
+        """获取所有工具的 JSON Schema 列表（发给 LLM）。按名称排序，缓存有效时不重建。"""
+        if self._defs_dirty:
+            self._defs_cache = sorted(
+                [t.definition for t in self.tools.values()],
+                key=lambda d: d.name,
+            )
+            self._defs_dirty = False
+        return self._defs_cache
 
     # ── 执行调度 ──
 

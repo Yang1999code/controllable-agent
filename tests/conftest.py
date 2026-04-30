@@ -80,6 +80,7 @@ class MockProvider:
         self.responses = responses or ["Hello, I am a mock AI."]
         self.call_count = 0
         self.model = "mock-model"
+        self._context_window_cache: int | None = 128000
 
     async def stream(self, messages, tools, system_prompt="", max_tokens=4096, temperature=0.0):
         from ai.provider import LLMEvent
@@ -96,6 +97,21 @@ class MockProvider:
 
     def count_tokens(self, text: str) -> int:
         return len(text) // 3
+
+    async def discover_context_window(self) -> int:
+        return self._context_window_cache or 128000
+
+    async def _fetch_model_context_window(self) -> int | None:
+        return None
+
+    @property
+    def max_output_tokens(self) -> int:
+        return 8192
+
+    @property
+    def usable_context(self) -> int:
+        cw = self._context_window_cache or 128000
+        return max(0, cw - self.max_output_tokens - 1000)
 
 
 @pytest.fixture

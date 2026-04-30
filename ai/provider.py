@@ -45,6 +45,10 @@ class IModelProvider(ABC):
     - AnthropicProvider（Anthropic 原生 Messages API）
     """
 
+    def __init__(self, model: str = ""):
+        self.model = model
+        self._context_window_cache: int | None = None
+
     @abstractmethod
     async def stream(
         self,
@@ -54,10 +58,6 @@ class IModelProvider(ABC):
         max_tokens: int = 4096,
         temperature: float = 0.0,
     ) -> AsyncIterator[LLMEvent]:
-        """流式调用 LLM，返回 AsyncIterator[LLMEvent]。
-
-        参考 Pi Agent streamSimple() 函数签名。
-        """
         ...
 
     @abstractmethod
@@ -68,13 +68,50 @@ class IModelProvider(ABC):
         system_prompt: str = "",
         max_tokens: int = 4096,
     ) -> list[LLMEvent]:
-        """非流式调用 LLM（用于子Agent等场景）。"""
         ...
 
     @abstractmethod
     def count_tokens(self, text: str) -> int:
-        """粗略 token 计数（用于预算控制，不需要精确）。"""
         ...
+
+    # ── 上下文窗口（动态查询，问一次缓存）───────────────
+
+    async def discover_context_window(self) -> int:
+        """查询模型上下文窗口大小。4 层优先级，结果缓存。"""
+        if self._context_window_cache is not None:
+            return self._context_window_cache
+
+        env_val = os.getenv("MY_AGENT_MAX_CONTEXT_TOKENS")
+        if env_val:
+            self._context_window_cache = int(env_val)
+            return self._context_window_cache
+
+        try:
+            discovered = await self._fetch_model_context_window()
+            if discovered:
+                self._context_window_cache = discovered
+                return discovered
+        except Exception:
+            pass
+
+        self._context_window_cache = self._default_context_window()
+        return self._context_window_cache
+
+    @abstractmethod
+    async def _fetch_model_context_window(self) -> int | None:
+        ...
+
+    def _default_context_window(self) -> int:
+        return 128000
+
+    @property
+    def max_output_tokens(self) -> int:
+        return 8192
+
+    @property
+    def usable_context(self) -> int:
+        cw = self._context_window_cache or self._default_context_window()
+        return max(0, cw - self.max_output_tokens - 1000)
 
 
 # ── OpenAI 兼容实现 ───────────────────────────────────
@@ -129,7 +166,7 @@ class OpenAICompatibleProvider(IModelProvider):
         api_key: str = "",
         max_retries: int = 3,
     ):
-        self.model = model
+        super().__init__(model)
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key or os.getenv("OPENAI_API_KEY", "")
         self.max_retries = max_retries
@@ -277,6 +314,26 @@ class OpenAICompatibleProvider(IModelProvider):
             results.append(event)
         return results
 
+    async def _fetch_model_context_window(self) -> int | None:
+        """问 API 模型信息端点，提取上下文窗口大小。"""
+        try:
+            client = await self._get_client()
+            resp = await client.get(f"{self.base_url}/models/{self.model}")
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            for key in ("max_context_tokens", "context_window", "max_input_tokens", "context_length"):
+                if key in data:
+                    return int(data[key])
+            info = data.get("model_info", {})
+            if isinstance(info, dict):
+                for key in ("max_context_tokens", "context_window", "max_input_tokens"):
+                    if key in info:
+                        return int(info[key])
+        except Exception:
+            pass
+        return None
+
     async def close(self) -> None:
         """关闭 HTTP 客户端，释放连接。"""
         if self._client is not None:
@@ -306,7 +363,7 @@ class AnthropicProvider(IModelProvider):
         api_key: str = "",
         max_retries: int = 3,
     ):
-        self.model = model
+        super().__init__(model)
         self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY", "")
         self.max_retries = max_retries
 
@@ -420,6 +477,9 @@ class AnthropicProvider(IModelProvider):
             except Exception as e:
                 yield LLMEvent(type="error", error=str(e))
                 return
+
+    async def _fetch_model_context_window(self) -> int | None:
+        return None  # Anthropic 没有模型信息查询端点
 
     async def chat(
         self,

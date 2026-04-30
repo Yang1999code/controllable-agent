@@ -48,19 +48,31 @@ class PromptBuilder:
 
     def __init__(self):
         self._fragments: dict[str, PromptFragment] = {}
-        self._cached_result: str | None = None
-        self._cached_hash: str = ""
+        self._system_prompt: str = ""
+        self._hash: str = ""
+        self._cached: str = ""
+
+    def set_system_prompt(self, text: str) -> None:
+        self._system_prompt = text
+        self._hash = ""
 
     def register_fragment(self, fragment: PromptFragment) -> None:
         self._fragments[fragment.name] = fragment
-        self._cached_result = None
+        self._hash = ""
 
     def unregister_fragment(self, name: str) -> None:
         self._fragments.pop(name, None)
-        self._cached_result = None
+        self._hash = ""
 
     def build(self, context: Context, max_tokens: int = 8000) -> str:
         """按优先级组装片段，超 token 预算则裁剪低优先级片段。"""
+        # 检查缓存 — 输入没变就返回上次结果
+        new_hash = hashlib.sha256(
+            (self._system_prompt + str(sorted(self._fragments.keys()))).encode()
+        ).hexdigest()
+        if new_hash == self._hash and self._cached:
+            return self._cached
+
         # 筛选出满足条件的片段
         fragments = sorted(
             [f for f in self._fragments.values()
@@ -68,29 +80,27 @@ class PromptBuilder:
             key=lambda f: f.priority,
         )
 
-        # 组装
+        # 组装：系统提示词在最前面
         parts: list[str] = []
-        token_count = 0
+        if self._system_prompt:
+            parts.append(self._system_prompt)
+        token_count = len(self._system_prompt) // 3
 
         for f in fragments:
-            frag_tokens = len(f.content) // 3  # 粗略计数
+            frag_tokens = len(f.content) // 3
             if f.priority <= 24:
-                # 核心片段，必须保留
                 parts.append(f.content)
                 token_count += frag_tokens
             elif token_count + frag_tokens <= max_tokens:
                 parts.append(f.content)
                 token_count += frag_tokens
-            # else: 裁剪
 
-        return "\n\n".join(parts)
+        self._hash = new_hash
+        self._cached = "\n\n".join(parts)
+        return self._cached
 
     def refresh_fragments(self, trigger: str) -> None:
-        """事件驱动刷新：plugin_loaded / memory_updated / turn_end 时调用。
-
-        V1：直接清缓存，下次 build() 重新计算。
-        """
-        self._cached_result = None
+        self._hash = ""
 
     def get_token_usage(self) -> dict:
         """返回各片段的 token 用量统计。"""
@@ -98,8 +108,3 @@ class PromptBuilder:
             name: {"chars": len(f.content), "approx_tokens": len(f.content) // 3}
             for name, f in self._fragments.items()
         }
-
-    def _compute_hash(self, context: Context) -> str:
-        """计算上下文哈希用于缓存判断（V2 预留）。"""
-        data = context.system_prompt + str(len(context.messages))
-        return hashlib.md5(data.encode()).hexdigest()

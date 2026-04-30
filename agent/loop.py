@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -21,6 +22,9 @@ from ai.provider import IModelProvider
 from agent.step_outcome import StepOutcome
 from agent.tool_registry import ToolRegistry
 from agent.hook import HookChain
+from agent.context_window import count_total_tokens, is_overflow
+from agent.cache_break import CacheBreakDetector
+from agent.compaction import compact, CompactionResult
 
 if TYPE_CHECKING:
     from agent.prompt import IPromptBuilder
@@ -40,8 +44,10 @@ class AgentConfig:
 
     max_turns: int = 100
     max_tool_calls_per_turn: int = 10
-    max_context_tokens: int = 128000
+    max_context_tokens: int = 0  # 0 = 自动从 provider 获取
     max_tool_result_chars: int = 50000
+    compaction_threshold: float = 0.85
+    emergency_threshold: float = 0.98
 
 
 @dataclass
@@ -93,6 +99,7 @@ class AgentLoop:
         self.capability_registry = capability_registry
         self.runtime = runtime
         self.autonomous_memory = autonomous_memory
+        self.cache_break = CacheBreakDetector()
 
     # ── 公共属性（供前端使用，不穿透内部）───────────────
 
@@ -112,7 +119,7 @@ class AgentLoop:
         total_output_tokens = 0
 
         # 添加用户消息
-        context.messages.append(Message(role="user", content=user_input))
+        context.messages.append(Message(role="user", content=user_input, id=uuid.uuid4().hex[:12]))
 
         # 加载 CLAUDE.md（首次运行，结果缓存到 context.metadata）
         if "claude_md_content" not in context.metadata:
@@ -195,10 +202,48 @@ class AgentLoop:
                     visible_names = set(self.capability_registry.get_visible_tools())
                     tool_defs = [d for d in tool_defs if d.name in visible_names]
 
+                # ── Phase 2/3: 上下文溢出检测 + 压缩 ──
+                tokens_used = count_total_tokens(
+                    context.messages, context.system_prompt, tool_defs,
+                )
+                limit = self.provider.usable_context
+                if is_overflow(tokens_used, limit, self.config.compaction_threshold):
+                    logger.warning(
+                        "context overflow %d/%d tokens (%.1f%%)",
+                        tokens_used, limit, tokens_used / max(limit, 1) * 100,
+                    )
+                    result = compact(
+                        messages=context.messages,
+                        system_prompt=context.system_prompt,
+                        tool_defs=tool_defs,
+                        usable_context=limit,
+                        threshold=self.config.compaction_threshold,
+                        emergency_threshold=self.config.emergency_threshold,
+                    )
+                    if result.layer_used != "none":
+                        context.messages = result.messages
+                        self.cache_break.notify_compaction(result.tail_start_id)
+                        logger.info(
+                            "compacted: layer=%s freed=%d tokens",
+                            result.layer_used, result.tokens_freed,
+                        )
+                        await self.hooks.fire(AgentEvent(
+                            type=AgentEventType.CONTEXT_COMPACTION,
+                            data={"layer": result.layer_used, "freed": result.tokens_freed},
+                        ))
+
+                # ── KV Cache 断点检测 ──
+                cache_broken = self.cache_break.is_break(
+                    context.system_prompt, tool_defs, context.messages,
+                )
+
+                effective_max = self.config.max_context_tokens or self.provider.usable_context
+                max_tokens = min(effective_max, self.provider.usable_context)
                 async for event in self.provider.stream(
                     messages=context.messages,
                     tools=tool_defs,
                     system_prompt=context.system_prompt,
+                    max_tokens=max_tokens,
                 ):
                     if event.type == "text_delta":
                         current_text += event.content
@@ -225,6 +270,7 @@ class AgentLoop:
                 if not current_tool_calls:
                     context.messages.append(Message(
                         role="assistant", content=current_text,
+                        id=uuid.uuid4().hex[:12],
                     ))
                     last_response_text = current_text
                     break
@@ -262,6 +308,7 @@ class AgentLoop:
                     role="assistant",
                     content=current_text or None,
                     tool_calls=openai_tool_calls,
+                    id=uuid.uuid4().hex[:12],
                 ))
 
                 # ★ 旁路监控：记录 LLM 调用
@@ -288,6 +335,7 @@ class AgentLoop:
                         content=result.content if result.success else f"Error: {result.error}",
                         tool_call_id=tc.get("tool_id", ""),
                         tool_name=result.tool_name,
+                        id=uuid.uuid4().hex[:12],
                     ))
 
                 # ★ Phase 3：检查子Agent收件箱（Agent间通信）
@@ -298,6 +346,7 @@ class AgentLoop:
                         context.messages.append(Message(
                             role="user",
                             content=f"[子Agent消息] {inbox_msg}",
+                            id=uuid.uuid4().hex[:12],
                         ))
 
             # ── turn_end Hook + 自进化嵌入（Phase 3）──
@@ -332,6 +381,7 @@ class AgentLoop:
                 if nudge:
                     context.messages.append(Message(
                         role="user", content=f"[系统提醒] {nudge}",
+                        id=uuid.uuid4().hex[:12],
                     ))
 
             # 如果模型被工具调用循环"卡住"，上限后立即退出

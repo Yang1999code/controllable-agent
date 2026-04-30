@@ -110,6 +110,16 @@ async def main():
         provider_kwargs["base_url"] = base_url
     provider = create_provider(provider_type, **provider_kwargs)
 
+    # 查询模型上下文窗口（问一次，打印提示，后续读缓存）
+    try:
+        win = await provider.discover_context_window()
+        if win >= 1_000_000:
+            _safe_print(f"[模型] {model} 上下文窗口: {win // 1_000_000}M tokens")
+        else:
+            _safe_print(f"[模型] {model} 上下文窗口: {win // 1000}K tokens")
+    except Exception:
+        pass
+
     tools = ToolRegistry()
     tools.max_result_chars = agent_cfg.get("max_tool_result_chars", 50000)
     register_all_tools(tools)
@@ -176,6 +186,16 @@ async def main():
 
     # PromptBuilder — 动态 prompt 片段组装
     prompt_builder = PromptBuilder()
+    prompt_builder.set_system_prompt(
+        f"你是 my-agent，一个来自 Empire code 开源项目的可控多智能体自迭代 AI Agent 框架。"
+        f"你底层运行的模型是 {model}，通过 OpenAI 兼容 API 连接。"
+        f"你的能力包括：文件读写与搜索（read/write/edit/glob/grep）、"
+        f"Shell 命令执行（bash）、浏览器自动化（web_browser_*）、"
+        f"HTTP 请求（web_fetch）、网页搜索（web_search）、"
+        f"以及多 Agent 协作（delegate_task/agent_message）。"
+        f"你支持流式响应、工具调用、自动记忆管理。"
+        f"请用中文回答用户的问题。当被问到你的身份时，如实说明你是 my-agent 框架，运行在 {model} 模型上。"
+    )
 
     # FlowInspector — 旁路运行监控
     inspector = FlowInspector()
