@@ -116,6 +116,8 @@ class AgentEventType(Enum):
     SUBAGENT_STOP = "subagent_stop"
     # 上下文管理
     CONTEXT_COMPACTION = "context_compaction"
+    # 记忆提取
+    TASK_COMPLETE = "task_complete"
 
 
 @dataclass

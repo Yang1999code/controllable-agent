@@ -22,6 +22,7 @@ from my_agent import (
     CapabilityCatalog, CapabilityRegistry,
     SkillRegistry, IUiSession,
     MCPServerConfig, MCPClient,
+    MemoryStore, FactStore, DomainIndex,
 )
 from app.providers import create_provider
 from app.tools import register_all_tools
@@ -216,6 +217,33 @@ async def main():
     except Exception:
         plugin_adapter = None
 
+    # ── 记忆提取引擎装配 ──────────────────────────────────
+    memory_extractor = None
+    try:
+        from agent.memory.task_detector import TaskDetector
+        from agent.memory.extractor import MemoryExtractor
+        import os as _os
+
+        memory_dir = _os.path.expanduser("~/.agent-memory")
+        _os.makedirs(memory_dir, exist_ok=True)
+        memory_store = MemoryStore(memory_dir)
+        fact_store = FactStore(memory_store)
+        domain_index = DomainIndex(memory_store, fact_store)
+
+        import asyncio as _aio
+        _aio.get_event_loop().run_until_complete(domain_index.initialize())
+
+        task_detector = TaskDetector()
+        memory_extractor = MemoryExtractor(
+            provider=provider,
+            fact_store=fact_store,
+            domain_index=domain_index,
+            task_detector=task_detector,
+        )
+        _safe_print(f"[记忆] 自动提取引擎已启用 (存储: {memory_dir})")
+    except Exception as e:
+        logger.debug("memory extractor assembly skipped: %s", e)
+
     loop_config = AgentConfig(
         max_turns=agent_cfg.get("max_turns", 100),
         max_tool_calls_per_turn=agent_cfg.get("max_tool_calls_per_turn", 10),
@@ -230,6 +258,7 @@ async def main():
         prompt_builder=prompt_builder,
         inspector=inspector,
         capability_registry=capability_registry,
+        memory_extractor=memory_extractor,
     )
 
     context = Context(

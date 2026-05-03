@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from agent.autonomous_memory import IAutonomousMemory
     from agent.inspector import IFlowInspector
     from agent.capability import ICapabilityRegistry
+    from agent.memory.extractor import MemoryExtractor
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,8 @@ class AgentLoop:
         # Phase 3 依赖（初始可为 None）
         runtime: "IAgentRuntime | None" = None,
         autonomous_memory: "IAutonomousMemory | None" = None,
+        # 记忆提取引擎（Phase 2）
+        memory_extractor: "MemoryExtractor | None" = None,
     ):
         self.provider = provider
         self.tools = tools
@@ -99,6 +102,7 @@ class AgentLoop:
         self.capability_registry = capability_registry
         self.runtime = runtime
         self.autonomous_memory = autonomous_memory
+        self.memory_extractor = memory_extractor
         self.cache_break = CacheBreakDetector()
 
     # ── 公共属性（供前端使用，不穿透内部）───────────────
@@ -393,9 +397,7 @@ class AgentLoop:
             break
 
         # 循环结束
-        await self.hooks.fire(AgentEvent(type=AgentEventType.LOOP_END))
-
-        return AgentResult(
+        result = AgentResult(
             status="completed" if turn_count < self.config.max_turns else "max_turns",
             messages=context.messages,
             total_turns=turn_count,
@@ -404,3 +406,35 @@ class AgentLoop:
             total_output_tokens=total_output_tokens,
             final_output=last_response_text,
         )
+
+        await self.hooks.fire(AgentEvent(
+            type=AgentEventType.LOOP_END,
+            data={"result": result},
+        ))
+
+        # 记忆提取（异步，不阻塞主循环返回）
+        if self.memory_extractor:
+            try:
+                session_id = context.metadata.get("session_id", uuid.uuid4().hex[:8])
+                extraction = await self.memory_extractor.check_and_extract(
+                    messages=context.messages,
+                    session_id=session_id,
+                    turn_count=turn_count,
+                    had_tool_calls=total_tool_calls > 0,
+                )
+                if extraction and extraction.success:
+                    logger.info(
+                        "memory extracted: digest=%s wiki=%s",
+                        extraction.digest_id, extraction.wiki_id,
+                    )
+                    await self.hooks.fire(AgentEvent(
+                        type=AgentEventType.TASK_COMPLETE,
+                        data={
+                            "digest_id": extraction.digest_id,
+                            "wiki_id": extraction.wiki_id,
+                        },
+                    ))
+            except Exception as e:
+                logger.warning("memory extraction failed (non-fatal): %s", e)
+
+        return result

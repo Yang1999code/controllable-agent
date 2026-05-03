@@ -36,6 +36,11 @@ from agent.mcp import MCPClient, MCPServerConfig, MCPToolAdapter
 from agent.memory.store import MemoryStore
 from agent.memory.backend import FileSystemMemoryBackend, IMemoryBackend
 from agent.memory.index import MemoryIndex
+from agent.memory.fact_store import FactStore, FactEntry
+from agent.memory.domain_index import DomainIndex, DomainEntry, IndexEntry
+from agent.memory.task_detector import TaskDetector, TaskDetection
+from agent.memory.extractor import MemoryExtractor, ExtractionResult
+from agent.memory.dedup import Deduplicator, DeduplicationResult, DuplicationVerdict
 
 # ── 上下文管理 ─────────────────────────────────────────
 from agent.context_window import (
@@ -71,6 +76,10 @@ __all__ = [
     "ISkill", "ISkillConfig",
     # memory
     "MemoryStore", "FileSystemMemoryBackend", "IMemoryBackend", "MemoryIndex",
+    "FactStore", "FactEntry", "DomainIndex", "DomainEntry", "IndexEntry",
+    "TaskDetector", "TaskDetection",
+    "MemoryExtractor", "ExtractionResult",
+    "Deduplicator", "DeduplicationResult", "DuplicationVerdict",
     # context management
     "estimate_tokens", "count_total_tokens", "is_overflow",
     "CacheBreakDetector", "compact", "CompactionResult",

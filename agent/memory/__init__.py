@@ -1,4 +1,6 @@
-"""agent/memory/ — IMemoryBackend 实现。
+"""agent/memory/ — 记忆系统实现。
 
-L0-L4 分层存储 + 中文分词关键词检索。
+双层架构：
+1. L0-L4 分层存储 + 中文分词关键词检索（原有系统）
+2. digest/wiki 新记忆系统 + 四域管理 + 倒排索引检索（Phase 1 新增）
 """

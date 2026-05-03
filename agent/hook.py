@@ -120,4 +120,5 @@ V1_EVENTS = frozenset({
     AgentEventType.LOOP_START,
     AgentEventType.LOOP_END,
     AgentEventType.ERROR,
+    AgentEventType.TASK_COMPLETE,
 })
