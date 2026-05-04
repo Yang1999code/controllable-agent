@@ -42,6 +42,11 @@ from agent.memory.task_detector import TaskDetector, TaskDetection
 from agent.memory.extractor import MemoryExtractor, ExtractionResult
 from agent.memory.dedup import Deduplicator, DeduplicationResult, DuplicationVerdict
 
+# ── Phase 3 多 Agent 协作 ──────────────────────────────
+from agent.memory.agent_store_factory import AgentStoreFactory, AgentStores
+from agent.memory.shared_space import SharedSpace
+from agent.role_prompts import load_role_config, load_all_roles, register_roles
+
 # ── 上下文管理 ─────────────────────────────────────────
 from agent.context_window import (
     estimate_tokens, count_total_tokens, is_overflow,
@@ -80,6 +85,10 @@ __all__ = [
     "TaskDetector", "TaskDetection",
     "MemoryExtractor", "ExtractionResult",
     "Deduplicator", "DeduplicationResult", "DuplicationVerdict",
+    # phase 3 multi-agent
+    "AgentStoreFactory", "AgentStores",
+    "SharedSpace",
+    "load_role_config", "load_all_roles", "register_roles",
     # context management
     "estimate_tokens", "count_total_tokens", "is_overflow",
     "CacheBreakDetector", "compact", "CompactionResult",

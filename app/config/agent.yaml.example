@@ -9,7 +9,8 @@ providers:
   openai_compat:
     base_url: https://api.deepseek.com/v1
     model: deepseek-chat
-    api_key: sk-1f9046981fbc47a7890032d26159dfd4
+    api_key_env: DEEPSEEK_API_KEY
+    # 或直接用 api_key: sk-xxx（不推荐，不要提交真实 key）
   anthropic:
     model: claude-sonnet-4-6
     api_key_env: ANTHROPIC_API_KEY

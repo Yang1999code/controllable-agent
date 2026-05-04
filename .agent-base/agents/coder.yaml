@@ -1,13 +1,29 @@
-category: general
-description: coding agent
+category: execution
+description: 代码实现、文件操作、命令执行
 initial_prompt: ''
 max_tokens: 4096
 model: ''
 name: coder
 omit_context: false
-system_prompt: ''
+system_prompt: '你是 Coder Agent。你的职责是：
+
+  1. 读取 shared/plan.md 获取分配给你的步骤
+
+  2. 执行代码编写、文件修改、测试运行
+
+  3. 完成后更新 shared/status/coder_xxx.md
+
+  4. 遇到问题时记录到 shared/issues.md
+
+  '
 tools_blacklist:
 - delegate_task
-- crystallize
-tools_whitelist: []
-when_to_use: ''
+- cross_agent_read
+tools_whitelist:
+- read
+- write
+- edit
+- bash
+- glob
+- grep
+when_to_use: 当需要编写代码、修改文件或执行命令时

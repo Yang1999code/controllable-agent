@@ -30,3 +30,6 @@ Thumbs.db
 # Environment
 .env
 .env.local
+
+# Config with secrets (use agent.yaml.example as template)
+app/config/agent.yaml

@@ -18,14 +18,15 @@ from app.tools.web_browser_type import BrowserTypeTool
 from app.tools.web_browser_snapshot import BrowserSnapshotTool
 from app.tools.delegate_task import DelegateTaskTool
 from app.tools.agent_message import AgentMessageTool
+from app.tools.cross_agent_read import CrossAgentReadTool
 
 
 def register_all_tools(registry: ToolRegistry) -> None:
-    """注册全部 14 个内置工具。
+    """注册全部 15 个内置工具。
 
     Phase 1 (6): read, write, edit, bash, glob, grep
     Phase 2 (6): web_fetch, web_search, web_browser_*
-    Phase 3 (2): delegate_task, agent_message
+    Phase 3 (3): delegate_task, agent_message, cross_agent_read
     """
     # Phase 1 — 基础文件/Shell 工具
     registry.register(FileReadTool())
@@ -46,3 +47,4 @@ def register_all_tools(registry: ToolRegistry) -> None:
     # Phase 3 — 多 Agent 协作工具
     registry.register(DelegateTaskTool())
     registry.register(AgentMessageTool())
+    registry.register(CrossAgentReadTool())

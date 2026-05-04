@@ -124,6 +124,11 @@ class AgentRuntime(IAgentRuntime):
 
     V1 采用 Hermes 线程级隔离（asyncio），参考 multica 信号量并发控制。
 
+    Phase 3 增强：
+    - store_factory: AgentStoreFactory 注入，为每个子 Agent 创建隔离存储
+    - shared_space: SharedSpace 共享区管理
+    - orchestrate(): 分阶段串并行编排
+
     并发安全规则（参考 Hermes delegate_tool.py skip_memory=True）：
     1. Nudge 只在主Agent的 turn_end 触发
     2. 子Agent的 tools_blacklist 默认含 memory 工具
@@ -138,6 +143,8 @@ class AgentRuntime(IAgentRuntime):
         max_concurrent: int = 3,
         max_depth: int = 2,
         default_timeout: int = 300,
+        store_factory=None,  # AgentStoreFactory（可选）
+        shared_space=None,  # SharedSpace（可选）
     ):
         self._tools = tools
         self._provider = provider
@@ -146,6 +153,8 @@ class AgentRuntime(IAgentRuntime):
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._max_depth = max_depth
         self._default_timeout = default_timeout
+        self._store_factory = store_factory
+        self._shared_space = shared_space
         self._agent_types: dict[str, AgentTypeConfig] = {}
         self._active_children: dict[str, dict] = {}
         self._inboxes: dict[str, asyncio.Queue] = {}
@@ -164,10 +173,12 @@ class AgentRuntime(IAgentRuntime):
             if tn not in self._tools:
                 raise ValueError(f"Tool '{tn}' in whitelist not found in catalog")
         self._agent_types[config.name] = config
-        try:
-            config.to_yaml(f".agent-base/agents/{config.name}.yaml")
-        except Exception as e:
-            logger.warning(f"Failed to persist agent config: {e}")
+        yaml_path = f".agent-base/agents/{config.name}.yaml"
+        if not Path(yaml_path).exists():
+            try:
+                config.to_yaml(yaml_path)
+            except Exception as e:
+                logger.warning(f"Failed to persist agent config: {e}")
 
     def get_agent_type(self, name: str) -> AgentTypeConfig | None:
         return self._agent_types.get(name)
@@ -285,6 +296,11 @@ class AgentRuntime(IAgentRuntime):
     ) -> SubAgentResult:
         """派生子Agent执行任务。
 
+        Phase 3 增强：
+        - 自动为子 Agent 创建隔离存储空间（通过 store_factory）
+        - 注入 SharedSpace 引用到 context
+        - 使用角色特定的 max_turns
+
         参考 Hermes delegate_tool.py 709-716行 的 spawn 流程。
         """
         task_id = uuid4().hex[:8]
@@ -316,10 +332,14 @@ class AgentRuntime(IAgentRuntime):
                 error=f"Unknown agent type: {agent_type}",
             )
 
-        # 1.5 为 agent_id 创建 inbox
+        # 1.5 为 agent_id 创建 inbox + 隔离存储
         agent_id = context.get("agent_id", task_id) if context else task_id
         if agent_id not in self._inboxes:
             self._inboxes[agent_id] = asyncio.Queue(maxsize=50)
+
+        # 1.6 Phase 3: 创建隔离存储空间
+        if self._store_factory:
+            self._store_factory.create_agent_stores(agent_id)
 
         # 2. 并发控制
         async with self._semaphore:
@@ -333,17 +353,24 @@ class AgentRuntime(IAgentRuntime):
             ))
 
             # 5. 构建隔离上下文
+            child_metadata = {
+                "task_id": task_id,
+                "agent_type": agent_type,
+                "agent_id": agent_id,
+                "_runtime": self,
+                "depth": current_depth + 1,
+                "parent_messages": context.get("parent_messages", []) if context else [],
+            }
+            # Phase 3: 注入 store_factory 和 shared_space
+            if self._store_factory:
+                child_metadata["_store_factory"] = self._store_factory
+            if self._shared_space:
+                child_metadata["_shared_space"] = self._shared_space
+
             child_context = Context(
                 system_prompt=config.system_prompt,
                 tools=filtered_tools,
-                metadata={
-                    "task_id": task_id,
-                    "agent_type": agent_type,
-                    "agent_id": task_id,
-                    "_runtime": self,
-                    "depth": current_depth + 1,
-                    "parent_messages": context.get("parent_messages", []) if context else [],
-                },
+                metadata=child_metadata,
             )
 
             # 注入 initial_prompt
@@ -374,7 +401,7 @@ class AgentRuntime(IAgentRuntime):
                     provider=self._provider,
                     tools=child_registry,
                     hooks=self._hooks,
-                    config=AgentConfig(max_turns=50),
+                    config=AgentConfig(max_turns=self._get_max_turns(agent_type)),
                 )
                 result = await asyncio.wait_for(
                     child_loop.run(task, child_context),
@@ -435,17 +462,15 @@ class AgentRuntime(IAgentRuntime):
     # ── spawn_parallel ──
 
     async def spawn_parallel(
-        self, tasks: list[dict], max_concurrency: int = 3,
+        self, tasks: list[dict], max_concurrency: int | None = None,
     ) -> list[SubAgentResult]:
         """并行派生多个子Agent。
 
-        参考 Pi Agent mapWithConcurrencyLimit(tasks, 4)。
+        使用 runtime 级别的信号量控制并发，不再创建额外的局部信号量。
+        max_concurrency 参数保留用于 API 兼容但不再生效。
         """
-        sem = asyncio.Semaphore(max_concurrency)
-
         async def bounded_spawn(task_dict):
-            async with sem:
-                return await self.spawn(**task_dict)
+            return await self.spawn(**task_dict)
 
         results = await asyncio.gather(
             *[bounded_spawn(t) for t in tasks],
@@ -486,3 +511,86 @@ class AgentRuntime(IAgentRuntime):
     async def _cleanup(self, task_id: str) -> None:
         """资源清理（参考 Hermes delegate_tool.py 643-684行 finally 块）。"""
         self._active_children.pop(task_id, None)
+
+    # ── Phase 3: 角色特定 max_turns ──
+
+    @staticmethod
+    def _get_max_turns(agent_type: str) -> int:
+        """获取角色特定的 max_turns，默认 50。"""
+        from agent.role_prompts import ROLE_MAX_TURNS
+        return ROLE_MAX_TURNS.get(agent_type, 50)
+
+    # ── Phase 3: 分阶段编排 ──
+
+    async def orchestrate(
+        self, user_request: str, max_retries: int = 3,
+    ) -> list[SubAgentResult]:
+        """分阶段串并行编排多 Agent 协作。
+
+        执行流程：
+        Phase A: await planner（串行）
+        Phase B: gather(coder+reviewer配对, memorizer, coordinator)（并行）
+        Phase C: await reviewer_final 总体集成测试（串行）
+        Phase D: await memorizer_final 总结（串行）
+
+        打回机制：Phase C 不通过 → 回到 Phase B（最多 max_retries 轮）
+        """
+        all_results: list[SubAgentResult] = []
+
+        # Phase A: Planner（串行，写 plan.md）
+        planner_result = await self.spawn(
+            agent_type="planner",
+            task=f"分析以下需求并分解为可执行步骤，写入 shared/plan.md：\n{user_request}",
+            context={"agent_id": "planner_001"},
+            current_depth=1,
+        )
+        all_results.append(planner_result)
+
+        if planner_result.status != "completed":
+            logger.error("Planner failed, aborting orchestration")
+            return all_results
+
+        # Phase B + C 循环（带打回机制）
+        for attempt in range(max_retries + 1):
+            # Phase B: 并行执行（Coder+Reviewer 配对 + Memorizer + Coordinator）
+            phase_b_tasks = [
+                {"agent_type": "coordinator", "task": "监控多 Agent 协作流程",
+                 "context": {"agent_id": "coordinator_001"}, "current_depth": 1},
+                {"agent_type": "memorizer", "task": "检索历史经验支持当前任务",
+                 "context": {"agent_id": "memorizer_001"}, "current_depth": 1},
+                {"agent_type": "coder", "task": "按 plan.md 执行代码实现",
+                 "context": {"agent_id": "coder_001"}, "current_depth": 1},
+                {"agent_type": "reviewer", "task": "模块级快速验证，和 coder_001 配对",
+                 "context": {"agent_id": "reviewer_001"}, "current_depth": 1},
+            ]
+            phase_b_results = await self.spawn_parallel(phase_b_tasks)
+            all_results.extend(phase_b_results)
+
+            # Phase C: 总体集成测试（串行）
+            phase_c_result = await self.spawn(
+                agent_type="reviewer",
+                task="执行总体集成测试：跑全量测试、检查模块间接口、验证整体架构一致性",
+                context={"agent_id": "reviewer_final"},
+                current_depth=1,
+            )
+            all_results.append(phase_c_result)
+
+            # 检查是否需要打回
+            if phase_c_result.status == "completed":
+                break
+            if attempt < max_retries:
+                logger.info("Integration test failed, retrying (attempt %d/%d)",
+                            attempt + 1, max_retries)
+            else:
+                logger.warning("Max retries reached (%d), marking ESCALATE", max_retries)
+
+        # Phase D: Memorizer 最终总结
+        phase_d_result = await self.spawn(
+            agent_type="memorizer",
+            task="总结本次协作：提取各 Agent 经验、结晶可复用技能提案",
+            context={"agent_id": "memorizer_002"},
+            current_depth=1,
+        )
+        all_results.append(phase_d_result)
+
+        return all_results

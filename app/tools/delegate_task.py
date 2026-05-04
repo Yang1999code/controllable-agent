@@ -55,6 +55,7 @@ class DelegateTaskTool:
                     "parent_messages": context.metadata.get("parent_messages", []),
                     "project_path": context.metadata.get("project_path", "."),
                 },
+                current_depth=context.metadata.get("depth", 0),
             )
             return ToolResult(
                 tool_name="delegate_task", success=True,

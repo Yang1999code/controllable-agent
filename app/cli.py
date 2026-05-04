@@ -23,6 +23,8 @@ from my_agent import (
     SkillRegistry, IUiSession,
     MCPServerConfig, MCPClient,
     MemoryStore, FactStore, DomainIndex,
+    AgentStoreFactory, SharedSpace,
+    load_role_config, register_roles,
 )
 from app.providers import create_provider
 from app.tools import register_all_tools
@@ -104,7 +106,13 @@ async def main():
     # 创建组件
     model = args.model or provider_cfg.get("model", "gpt-4o")
     base_url = provider_cfg.get("base_url", "")
+    # 支持从环境变量读取 API Key
     api_key = args.api_key or provider_cfg.get("api_key", "")
+    if not api_key:
+        env_var = provider_cfg.get("api_key_env", "")
+        if env_var:
+            import os
+            api_key = os.environ.get(env_var, "")
     provider_type = args.provider or config.get("providers", {}).get("default", "openai_compat")
     provider_kwargs = {"model": model, "api_key": api_key}
     if base_url:
@@ -244,6 +252,34 @@ async def main():
     except Exception as e:
         logger.debug("memory extractor assembly skipped: %s", e)
 
+    # ── Phase 3 多 Agent 协作装配 ─────────────────────────
+    runtime = None
+    try:
+        from agent.runtime import AgentRuntime
+
+        store_factory = AgentStoreFactory(
+            base_path=_os.path.expanduser("~/.agent-memory"),
+        )
+        shared_store = store_factory.get_shared_store()
+        shared_space = SharedSpace(shared_store)
+        await shared_space.initialize()
+
+        tools_dict = dict(tools.tools)
+
+        runtime = AgentRuntime(
+            tools=tools_dict,
+            provider=provider,
+            hooks=hooks,
+            max_concurrent=agent_cfg.get("max_concurrent", 5),
+            store_factory=store_factory,
+            shared_space=shared_space,
+        )
+        registered = register_roles(runtime)
+        if registered:
+            _safe_print(f"[多Agent] 已注册角色: {', '.join(registered)}")
+    except Exception as e:
+        logger.debug("Phase 3 assembly skipped: %s", e)
+
     loop_config = AgentConfig(
         max_turns=agent_cfg.get("max_turns", 100),
         max_tool_calls_per_turn=agent_cfg.get("max_tool_calls_per_turn", 10),
@@ -259,6 +295,7 @@ async def main():
         inspector=inspector,
         capability_registry=capability_registry,
         memory_extractor=memory_extractor,
+        runtime=runtime,
     )
 
     context = Context(

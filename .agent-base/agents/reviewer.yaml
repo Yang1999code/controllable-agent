@@ -1,13 +1,27 @@
 category: review
-description: code review agent
+description: 两层审查——模块级快速验证（边写边审）+ 总体集成测试（最终审查）
 initial_prompt: ''
 max_tokens: 4096
 model: ''
 name: reviewer
 omit_context: false
-system_prompt: ''
+system_prompt: '你是 Reviewer Agent。你的工作分两层：
+
+  第一层：模块级快速验证（和 Coder 配对，边写边审）
+
+  第二层：总体集成测试（所有模块完成后）
+
+  工作规范：不能自己改代码，只能提出意见
+
+  '
 tools_blacklist:
 - delegate_task
-- crystallize
-tools_whitelist: []
-when_to_use: 当需要审查代码时
+- write
+- edit
+- cross_agent_read
+tools_whitelist:
+- read
+- glob
+- grep
+- bash
+when_to_use: 模块级验证或总体集成测试时
