@@ -401,7 +401,10 @@ class AgentRuntime(IAgentRuntime):
                     provider=self._provider,
                     tools=child_registry,
                     hooks=self._hooks,
-                    config=AgentConfig(max_turns=self._get_max_turns(agent_type)),
+                    config=AgentConfig(
+                        max_turns=self._get_max_turns(agent_type),
+                        max_tool_calls_per_turn=self._get_max_tool_calls(agent_type),
+                    ),
                 )
                 result = await asyncio.wait_for(
                     child_loop.run(task, child_context),
@@ -445,11 +448,14 @@ class AgentRuntime(IAgentRuntime):
                 },
             ))
 
+            raw_output = result.final_output if result else ""
+            safe_output = raw_output.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+
             return SubAgentResult(
                 task_id=task_id,
                 agent_type=agent_type,
                 status=status,
-                output=result.final_output if result else "",
+                output=safe_output,
                 usage={
                     "input_tokens": result.total_input_tokens if result else 0,
                     "output_tokens": result.total_output_tokens if result else 0,
@@ -519,6 +525,12 @@ class AgentRuntime(IAgentRuntime):
         """获取角色特定的 max_turns，默认 50。"""
         from agent.role_prompts import ROLE_MAX_TURNS
         return ROLE_MAX_TURNS.get(agent_type, 50)
+
+    @staticmethod
+    def _get_max_tool_calls(agent_type: str) -> int:
+        """获取角色特定的 max_tool_calls_per_turn，默认 15。"""
+        from agent.role_prompts import ROLE_MAX_TOOL_CALLS
+        return ROLE_MAX_TOOL_CALLS.get(agent_type, 15)
 
     # ── Phase 3: 分阶段编排 ──
 

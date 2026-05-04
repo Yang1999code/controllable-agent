@@ -25,6 +25,16 @@ ROLE_MAX_TURNS: dict[str, int] = {
     "memorizer": 10,
 }
 
+# 角色 max_tool_calls_per_turn 配置
+# coder 需要大量文件操作，给 30；reviewer 需要读+验证，给 20
+ROLE_MAX_TOOL_CALLS: dict[str, int] = {
+    "coordinator": 15,
+    "planner": 20,
+    "coder": 30,
+    "reviewer": 20,
+    "memorizer": 10,
+}
+
 
 def load_role_config(role_name: str, config_dir: Path | str | None = None) -> AgentTypeConfig:
     """加载单个角色的 YAML 配置。
