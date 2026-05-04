@@ -173,6 +173,17 @@ async def main():
     # SkillRegistry — 技能注册表
     skill_registry = SkillRegistry()
 
+    # SkillCrystallizer — 技能结晶器
+    skill_crystallizer = None
+    try:
+        from agent.crystallizer import SkillCrystallizer
+        skill_crystallizer = SkillCrystallizer(skill_registry)
+        loaded = skill_crystallizer.load_existing_skills()
+        if loaded:
+            _safe_print(f"[技能] 已加载 {loaded} 个结晶技能")
+    except Exception as e:
+        logger.debug("SkillCrystallizer assembly skipped: %s", e)
+
     # Capability 渐进式披露 — 标记各工具的 Tier
     catalog = CapabilityCatalog()
     capability_registry = CapabilityRegistry(catalog)
@@ -332,6 +343,7 @@ async def main():
             "_runtime": runtime,
             "_hooks": hooks,
             "_memory_extractor": memory_extractor,
+            "_skill_crystallizer": skill_crystallizer,
             "agent_id": "main",
         },
     )

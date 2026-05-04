@@ -403,7 +403,10 @@ class AgentRuntime(IAgentRuntime):
                     hooks=self._hooks,
                     config=AgentConfig(
                         max_turns=self._get_max_turns(agent_type),
-                        max_tool_calls_per_turn=self._get_max_tool_calls(agent_type),
+                        max_tool_calls_per_turn=context.get(
+                            "_max_tool_calls_override",
+                            self._get_max_tool_calls(agent_type),
+                        ) if context else self._get_max_tool_calls(agent_type),
                     ),
                 )
                 result = await asyncio.wait_for(
@@ -532,23 +535,50 @@ class AgentRuntime(IAgentRuntime):
         from agent.role_prompts import ROLE_MAX_TOOL_CALLS
         return ROLE_MAX_TOOL_CALLS.get(agent_type, 15)
 
+    @staticmethod
+    def _estimate_task_complexity(plan_content: str) -> dict[str, int]:
+        """从 plan.md 内容估算任务复杂度，返回各角色的动态 max_tool_calls。
+
+        规则：
+        - 统计文件数（write/create/new file 等关键词）
+        - 统计步骤数（### / Step / 步骤 等标记）
+        - 文件数 <= 3: 简单 → coder=30, reviewer=20
+        - 文件数 4-8: 中等 → coder=50, reviewer=30
+        - 文件数 >= 9 或步骤 >= 10: 复杂 → coder=80, reviewer=40
+        """
+        file_count = 0
+        for pattern in [r'\b\w+\.py\b', r'\b\w+\.js\b', r'\b\w+\.ts\b',
+                        r'\b\w+\.html\b', r'\b\w+\.css\b', r'\b\w+\.json\b',
+                        r'\b\w+\.yaml\b', r'\b\w+\.yml\b', r'\b\w+\.md\b']:
+            file_count += len(re.findall(pattern, plan_content))
+
+        step_count = len(re.findall(r'(?:^###?\s|Step\s*\d+|步骤\s*\d+|\d+\.\s)', plan_content))
+
+        if file_count >= 9 or step_count >= 10:
+            return {"coder": 80, "reviewer": 40, "planner": 25}
+        elif file_count >= 4 or step_count >= 5:
+            return {"coder": 50, "reviewer": 30, "planner": 20}
+        else:
+            return {"coder": 30, "reviewer": 20, "planner": 15}
+
     # ── Phase 3: 分阶段编排 ──
 
     async def orchestrate(
         self, user_request: str, max_retries: int = 3,
-        memory_extractor=None,
+        memory_extractor=None, skill_crystallizer=None,
     ) -> list[SubAgentResult]:
         """分阶段串并行编排多 Agent 协作。
 
         执行流程：
         Phase A: await planner（串行）
+        Phase A+: 分析 plan.md 复杂度，动态调整 max_tool_calls
         Phase B: gather(coder+reviewer配对, memorizer, coordinator)（并行）
         Phase C: await reviewer_final 总体集成测试（串行）
         Phase C+: await reviewer_adversarial 对抗审查（串行）
-        Phase Fix: coder 修复对抗发现的问题（串行，最多 2 轮）
-        Phase Verify: reviewer 验证修复（串行）
-        Phase D: await memorizer_final 总结（串行）
+        Phase Fix+Verify: 修复+验证（最多 2 轮）
+        Phase D: await memorizer_final 总结+技能结晶（串行）
         Phase Memory: 统一记忆提取
+        Phase Skill: 技能结晶持久化
 
         打回机制：Phase C 不通过 → 回到 Phase B（最多 max_retries 轮）
         """
@@ -568,6 +598,11 @@ class AgentRuntime(IAgentRuntime):
             logger.error("Planner failed, aborting orchestration")
             return all_results
 
+        # Phase A+: 分析 plan.md 复杂度，动态调整 max_tool_calls
+        complexity_overrides = self._read_plan_complexity()
+        if complexity_overrides:
+            logger.info("Task complexity: %s (dynamic overrides)", complexity_overrides)
+
         # Phase B + C 循环（带打回机制）
         for attempt in range(max_retries + 1):
             # Phase B: 并行执行（Coder+Reviewer 配对 + Memorizer + Coordinator）
@@ -577,11 +612,15 @@ class AgentRuntime(IAgentRuntime):
                 {"agent_type": "memorizer", "task": "检索历史经验支持当前任务",
                  "context": {"agent_id": "memorizer_001"}, "current_depth": 1},
                 {"agent_type": "coder", "task": "按 plan.md 执行代码实现",
-                 "context": {"agent_id": "coder_001"}, "current_depth": 1},
+                 "context": {"agent_id": "coder_001",
+                             "_max_tool_calls_override": complexity_overrides.get("coder")},
+                 "current_depth": 1},
                 {"agent_type": "reviewer",
                  "task": ("读取 Coder 已写的代码，检查类型注解和方法名遮蔽问题，"
                           "运行已有测试验证通过，发现问题写入 shared/issues.md"),
-                 "context": {"agent_id": "reviewer_001"}, "current_depth": 1},
+                 "context": {"agent_id": "reviewer_001",
+                             "_max_tool_calls_override": complexity_overrides.get("reviewer")},
+                 "current_depth": 1},
             ]
             phase_b_results = await self.spawn_parallel(phase_b_tasks)
             all_results.extend(phase_b_results)
@@ -593,7 +632,8 @@ class AgentRuntime(IAgentRuntime):
                       "2) 运行 pytest <目录>/tests/ -v "
                       "3) 如果测试失败，分析失败原因并记录到 shared/issues.md "
                       "4) 检查所有模块导入和接口一致性"),
-                context={"agent_id": "reviewer_final"},
+                context={"agent_id": "reviewer_final",
+                         "_max_tool_calls_override": complexity_overrides.get("reviewer")},
                 current_depth=1,
             )
             all_results.append(phase_c_result)
@@ -620,7 +660,8 @@ class AgentRuntime(IAgentRuntime):
                 "6) 检查是否有安全隐患（路径穿越、命令注入）\n"
                 "7) 找到的所有问题记录到 shared/issues.md，标明严重级别"
             ),
-            context={"agent_id": "reviewer_adversarial"},
+            context={"agent_id": "reviewer_adversarial",
+                     "_max_tool_calls_override": complexity_overrides.get("reviewer")},
             current_depth=1,
         )
         all_results.append(adversarial_result)
@@ -646,7 +687,8 @@ class AgentRuntime(IAgentRuntime):
                     "修复后运行 pytest 确认没有引入新问题。\n"
                     "修复完成后清空 shared/issues.md 中的已修复条目。"
                 ),
-                context={"agent_id": f"coder_fix_{fix_rounds:03d}"},
+                context={"agent_id": f"coder_fix_{fix_rounds:03d}",
+                             "_max_tool_calls_override": complexity_overrides.get("coder")},
                 current_depth=1,
             )
             all_results.append(fix_result)
@@ -661,15 +703,33 @@ class AgentRuntime(IAgentRuntime):
                     "3) 检查修复是否引入新问题\n"
                     "4) 如果仍有问题，记录到 shared/issues.md"
                 ),
-                context={"agent_id": f"reviewer_verify_{fix_rounds:03d}"},
+                context={"agent_id": f"reviewer_verify_{fix_rounds:03d}",
+                         "_max_tool_calls_override": complexity_overrides.get("reviewer")},
                 current_depth=1,
             )
             all_results.append(verify_result)
 
-        # Phase D: Memorizer 最终总结
+        # Phase D: Memorizer 最终总结（含技能结晶）
         phase_d_result = await self.spawn(
             agent_type="memorizer",
-            task="总结本次协作：提取各 Agent 经验、结晶可复用技能提案",
+            task=(
+                "总结本次协作经验。除了常规总结外，请结晶可复用技能：\n"
+                "对每个可复用技能，输出如下 YAML 块：\n"
+                "```skill\n"
+                "name: 技能名称（英文，下划线分隔）\n"
+                "description: 一句话描述\n"
+                "trigger_condition: 触发关键词（空格分隔）\n"
+                "steps:\n"
+                "  - tool: 工具名\n"
+                "    args: {参数}\n"
+                "    description: 步骤说明\n"
+                "config:\n"
+                "  category: 分类\n"
+                "  priority: 50\n"
+                "  tags: [标签1, 标签2]\n"
+                "```\n"
+                "只结晶真正可复用的模式，不要为简单任务创建技能。"
+            ),
             context={"agent_id": "memorizer_002"},
             current_depth=1,
         )
@@ -688,6 +748,17 @@ class AgentRuntime(IAgentRuntime):
                                 extraction.digest_id, extraction.wiki_id)
             except Exception as e:
                 logger.warning("orchestration memory extraction failed (non-fatal): %s", e)
+
+        # Phase Skill: 技能结晶持久化
+        if skill_crystallizer is not None:
+            try:
+                memorizer_output = phase_d_result.output if phase_d_result.status == "completed" else ""
+                if memorizer_output:
+                    crystallized = skill_crystallizer.crystallize(memorizer_output)
+                    if crystallized:
+                        logger.info("Crystallized %d skills from memorizer output", len(crystallized))
+            except Exception as e:
+                logger.warning("Skill crystallization failed (non-fatal): %s", e)
 
         return all_results
 
@@ -711,3 +782,25 @@ class AgentRuntime(IAgentRuntime):
             return False
         except Exception:
             return False
+
+    def _read_plan_complexity(self) -> dict[str, int]:
+        """读取 shared/plan.md 分析任务复杂度，返回动态 max_tool_calls 覆盖。
+
+        如果 plan.md 不存在或无法解析，返回空 dict（使用默认值）。
+        """
+        if not self._shared_space:
+            return {}
+        try:
+            store = self._shared_space._store
+            plan_path = store.root_path / "shared" / "plan.md"
+            if not plan_path.exists():
+                return {}
+            plan_content = plan_path.read_text(encoding="utf-8")
+            if not plan_content.strip():
+                return {}
+            overrides = self._estimate_task_complexity(plan_content)
+            logger.info("Plan complexity analysis: %s", overrides)
+            return overrides
+        except Exception as e:
+            logger.debug("Failed to read plan for complexity: %s", e)
+            return {}

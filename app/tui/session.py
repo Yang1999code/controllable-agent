@@ -699,7 +699,10 @@ async def _run_orchestration(session: TuiSession, runtime, task: str):
     """后台运行多智能体编排。"""
     try:
         memory_extractor = session._context.metadata.get("_memory_extractor")
-        results = await runtime.orchestrate(task, memory_extractor=memory_extractor)
+        skill_crystallizer = session._context.metadata.get("_skill_crystallizer")
+        results = await runtime.orchestrate(
+            task, memory_extractor=memory_extractor, skill_crystallizer=skill_crystallizer,
+        )
 
         # 汇总结果
         session._stop_spinner()

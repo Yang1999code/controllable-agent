@@ -31,6 +31,7 @@ from agent.skill import (
     Skill, SkillConfig, SkillRegistry,
     ISkill, ISkillConfig,
 )
+from agent.crystallizer import SkillCrystallizer
 from agent.web import WebAutomation, IWebAutomation
 from agent.mcp import MCPClient, MCPServerConfig, MCPToolAdapter
 from agent.memory.store import MemoryStore
@@ -77,7 +78,7 @@ __all__ = [
     # mcp
     "MCPClient", "MCPServerConfig", "MCPToolAdapter",
     # skills
-    "Skill", "SkillConfig", "SkillRegistry",
+    "Skill", "SkillConfig", "SkillRegistry", "SkillCrystallizer",
     "ISkill", "ISkillConfig",
     # memory
     "MemoryStore", "FileSystemMemoryBackend", "IMemoryBackend", "MemoryIndex",
