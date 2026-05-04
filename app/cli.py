@@ -86,6 +86,11 @@ async def run_legacy_repl(loop: AgentLoop, context: Context):
 
 
 async def main():
+    # Windows 终端 UTF-8 支持
+    if sys.platform == "win32":
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
     parser = argparse.ArgumentParser(description="my-agent — AI Agent 框架")
     parser.add_argument("--model", default="", help="模型名")
     parser.add_argument("--provider", default="", help="提供商类型 (openai_compat / anthropic)")
@@ -194,6 +199,8 @@ async def main():
     )
 
     # PromptBuilder — 动态 prompt 片段组装
+    import os as _os_cwd
+    _cwd = _os_cwd.getcwd()
     prompt_builder = PromptBuilder()
     prompt_builder.set_system_prompt(
         f"你是 my-agent，一个来自 Empire code 开源项目的可控多智能体自迭代 AI Agent 框架。"
@@ -204,6 +211,11 @@ async def main():
         f"以及多 Agent 协作（delegate_task/agent_message）。"
         f"你支持流式响应、工具调用、自动记忆管理。"
         f"请用中文回答用户的问题。当被问到你的身份时，如实说明你是 my-agent 框架，运行在 {model} 模型上。"
+        f"\n\n重要环境信息："
+        f"\n- 当前工作目录: {_cwd}"
+        f"\n- 操作系统: Windows"
+        f"\n- 使用工具时请用绝对路径或基于工作目录的相对路径"
+        f"\n- 不要运行需要用户交互式输入的程序（如 input()），改为接受命令行参数或用管道输入"
     )
 
     # FlowInspector — 旁路运行监控
@@ -238,8 +250,7 @@ async def main():
         fact_store = FactStore(memory_store)
         domain_index = DomainIndex(memory_store, fact_store)
 
-        import asyncio as _aio
-        _aio.get_event_loop().run_until_complete(domain_index.initialize())
+        await domain_index.initialize()
 
         task_detector = TaskDetector()
         memory_extractor = MemoryExtractor(
@@ -308,9 +319,14 @@ async def main():
             f"以及多 Agent 协作（delegate_task/agent_message）。"
             f"你支持流式响应、工具调用、自动记忆管理。"
             f"请用中文回答用户的问题。当被问到你的身份时，如实说明你是 my-agent 框架，运行在 {model} 模型上。"
+            f"\n\n重要环境信息："
+            f"\n- 当前工作目录: {_cwd}"
+            f"\n- 操作系统: Windows"
+            f"\n- 使用工具时请用绝对路径或基于工作目录的相对路径"
+            f"\n- 不要运行需要用户交互式输入的程序（如 input()），改为接受命令行参数或用管道输入"
         ),
         metadata={
-            "project_path": ".",
+            "project_path": _cwd,
             "_web": web,
             "_skill_registry": skill_registry,
             "_runtime": runtime,
