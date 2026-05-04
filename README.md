@@ -1,87 +1,205 @@
 # Controllable Agent
 
-> AI Agent 框架 -- 20 接口 · 三层架构 · 多 Agent 协作 · 自主学习进化 · 实时终端可视化
+> 一个能自己组织团队、自己记忆、自己进化的 AI Agent 框架。
+> 5 个 Agent 角色分工协作 + Wiki 式记忆系统 + 实时终端可视化。
 
-## 设计理念
+---
 
-现代 AI 编程 Agent（Claude Code、Pi Agent、Hermes）在核心能力上趋同——循环、工具、记忆——但在扩展性、多 Agent 协作、自主学习上走了不同岔路。这个项目融合了 10 个开源 Agent 项目的设计精华，构建一个**结构化可扩展**的参考实现。
+## 它能做什么？
+
+想象你给 AI 一个复杂任务，比如"帮我从零搭建一个认证系统"。
+
+普通 Agent 会怎么做？一个模型从头干到尾，边写边忘，写到后面忘了前面。
+
+**Controllable Agent 会这么做**：
+
+```
+你："帮我实现用户认证模块"
+
+1. Planner 先分析需求，拆成 3 个子任务，写好计划
+2. 3 组 Coder + Reviewer 配对并行开工
+   - Coder 写 JWT → Reviewer 验证 → 通过
+   - Coder 写路由 → Reviewer 验证 → 有 bug → 修复 → 再验 → 通过
+   - Coder 写中间件 → Reviewer 验证 → 通过
+3. Coordinator 全程监控，谁卡了就拉一把
+4. 总体集成测试 → 通过
+5. Memorizer 提炼经验，下次更快
+
+全程你可以随时插话，Coordinator 会接住你的补充信息。
+```
+
+**不需要你指挥，5 个 Agent 自己协商、并行、互相审查。**
+
+---
+
+## 两大创新
+
+### 创新 1：5 角色分工的多 Agent 协作
+
+不是把任务丢给一个 Agent，而是像软件团队一样分工：
+
+| 角色 | 干什么 | 一句话 |
+|------|--------|--------|
+| **Coordinator** | 管理者 | 不干活，专门管人。谁能创建、谁越权了、谁卡住了 |
+| **Planner** | 设计师 | 写计划但不走人，全程动态调整，永远记住用户原话 |
+| **Coder** | 开发 | 写代码、跑测试，按计划执行 |
+| **Reviewer** | 审查 | 和 Coder 配对，写完一个模块立马验，边写边审 |
+| **Memorizer** | 记录员 | 记事 + 从经验中提炼可复用技能 |
+
+关键设计：
+
+- **Coder + Reviewer 配对**：不是写完再审查，而是写一个小模块就验一个，快速迭代。多组配对可以并行跑。
+- **两层打回**：模块级打回不限次数（配对内自己解决），总体集成测试最多 3 轮。超了就升级给你处理。
+- **用户随时插话**：你中途补充的信息由 Coordinator 接收，按紧急度分级处理，不中断主流程。
+- **嵌套深度控制**：最多 2 层（主 Agent → Coordinator → 工作 Agent），防止套娃。
+- **无硬编码上限**：任务拆得越细，配对越多，并行度越高。用 Semaphore 控制并发。
+
+详见 [多智能体设计.md](多智能体设计.md)。
+
+### 创新 2：Wiki 式记忆系统
+
+Agent 的记忆不是混沌的聊天记录，而是像 Wikipedia 一样结构化：
+
+```
+你做了几次任务
+    ↓
+每次完成后，自动提取摘要（digest）—— 标题 + 3-5 个要点
+    ↓
+积累 5+ 个同主题的摘要后，合并成知识页（wiki）
+    ↓
+下次遇到类似问题，先查 wiki（最完整），再查 digest（更细粒度）
+查不到 = 没说过 = 不编造（抗幻觉）
+```
+
+**核心特点**：
+
+- **digest → wiki 两层就够**：大部分信息一个摘要 + 一个知识页就覆盖了
+- **Markdown + YAML frontmatter 存储**：人可读，用任何编辑器都能看
+- **四域分类**：对话记忆、个人档案、Agent 视角、任务状态，各有分工
+- **专用轻量模型提取**：主 Agent 不分心，用便宜的小模型做记忆提取
+- **批量而非逐轮**：一个任务单元完成后才提取，不是每句话都存
+- **多 Agent 隔离**：每个 Agent 有独立记忆空间，通过共享区交流，互不干扰
+
+详见 [我的记忆改进.md](我的记忆改进.md)。
+
+---
+
+## 技术架构
+
+三层单向依赖，绝不反向：
+
+```
+ai/          ← 核心类型（Message, Tool, Context），零依赖
+agent/       ← 20 个接口实现（循环, 工具, 记忆, Hook, 运行时...）
+app/         ← CLI + 15 内置工具 + 模型适配器 + 配置 + TUI
+```
 
 **核心信条**：
 - **分层单向依赖** -- `ai/` 零依赖 -> `agent/` 核心逻辑 -> `app/` 具体实现，绝不反向
-- **接口先于实现** -- 每个模块先定义 ABC/Protocol，再写具体类。预留接口只保留签名
+- **接口先于实现** -- 每个模块先定义 ABC/Protocol，再写具体类
 - **安全网内建而非外挂** -- 工具预算、API 重试、Hook 隔离、token 预算从第一行代码就在
 - **进化靠结晶而非训练** -- 成功任务自动提取工具序列 -> 质量评分 -> 持久化为可复用技能
 
-## 架构
+### 20 接口全景
 
-```
-用户输入
-  |
-  +-- claudemd 层级发现 CLAUDE.md -> 注入 system prompt (priority=0)
-  +-- IPromptBuilder 动态组装 -> 能力概览 + 记忆摘要 + 检查点 + Nudge
-  |
-  +-- Agent 主循环 (双层: followUp + tool_calls)
-  |   +-- IModelProvider.stream() -> LLM 推理
-  |   +-- ITool.execute() -> 工具并发/串行调度
-  |   +-- IHook 事件链 (22 事件点) -> 插件扩展 + 实时 UI 渲染
-  |   +-- IFlowInspector 旁路监控 -> 零阻塞
-  |   |
-  |   +-- * 实时 Hook 事件: STREAM_TEXT / STREAM_THINKING / TOOL_PROGRESS
-  |   +-- * turn_end -> 检查点更新 + Nudge + 结晶评估
-  |   +-- * Agent 委托 -> IAgentRuntime.spawn() -> 子Agent 隔离执行
-  |
-  +-- 终端 TUI (流式渲染 + 多 Agent 面板)
-  |
-  +-- 输出
-```
+| 接口 | 职责 | 状态 |
+|------|------|------|
+| **ITool** | 工具注册 / 并发安全 / 结果预算 | V1 |
+| **IModelProvider** | 模型流式推理 (OpenAI 兼容 + Anthropic) | V1 |
+| **IMemoryBackend** | L0-L4 分层记忆, 关键词检索, jieba 分词 | V1 |
+| **IHook** | 22 事件链, 优先级排序, 异常隔离 | V1 |
+| **ISkill** / **ISkillConfig** | 技能注册 / YAML 加载 / 关键词匹配 | V1 |
+| **IFlowInspector** | AsyncQueue 旁路, 滑动窗口统计 | V1 |
+| **ICapabilityCatalog** / **ICapabilityRegistry** | Tier 渐进式披露, copy-on-read | V2 |
+| **IPluginAdapter** | 4 层发现 / yaml manifest / 热重载 | V2 |
+| **IPromptBuilder** | 片段式动态组装, token 预算 | V2 |
+| **IWebAutomation** | fetch + search + browser (httpx + Playwright) | V2 |
+| **IAgentRuntime** | spawn/spawn_parallel, 并发控制, Agent 通信 | V3 |
+| **IAutonomousMemory** | 检查点 + 结晶 + Nudge + 长期更新 | V3 |
+| **ISelfModification** | quality_score 三维评分 | V3 |
+| **IToolErrorPolicy** | 工具异常策略 | 预留 V2 |
+| **IHotLoader** | 运行时热加载 | 预留 V2 |
+| **IDiscovery** | 自动发现 | 预留 V2 |
+| **IMultiModelOrchestrator** | 多模型协同 | 预留 V3 |
+| **IPluginMarketplace** | 插件市场 | 预留 V3 |
+| **IMetaAgent** | 元 Agent 自优化 | 预留 V4 |
 
-**三层目录**：
+### 15 内置工具
 
-```
-ai/          <- Message, Tool, Context, AgentEvent (零依赖)
-agent/       <- 20 个接口实现 (循环, 工具, 记忆, Hook, 插件, prompt, 运行时...)
-app/         <- CLI + 15 内置工具 + 模型适配器 + 配置 + TUI
-```
+| 工具 | 说明 | 图标 |
+|------|------|------|
+| read | 文件读取 | R |
+| write | 文件写入 | W |
+| edit | 文件编辑（字符串替换） | E |
+| bash | Shell 命令执行 | $ |
+| glob | 文件名模式搜索 | G |
+| grep | 文件内容搜索 | S |
+| web_fetch | HTTP 请求 | H |
+| web_search | 网页搜索 | Q |
+| web_browser_* | 浏览器自动化 (6 个子工具) | - |
+| delegate_task | 多 Agent 任务委托 | D |
+| agent_message | Agent 间通信 | M |
+| cross_agent_read | 跨 Agent 只读访问 | X |
+| memory_store | 记忆存储 | - |
+| memory_search | 记忆搜索 | - |
+| skill_lookup | 技能查找 | - |
+
+**支持任意 OpenAI 兼容模型**：DeepSeek / 通义千问 / 智谱 / OpenAI / Anthropic 都行。
+
+---
 
 ## 快速开始
 
 ```bash
-# 克隆
 git clone https://github.com/Yang1999code/controllable-agent.git
 cd controllable-agent
-
-# 安装
 pip install -e .
 
-# 配置 (复制模板，填入 API Key)
+# 配置 API Key
 cp app/config/agent.yaml.example app/config/agent.yaml
-# 编辑 app/config/agent.yaml，填入你的 API Key 或设置环境变量 DEEPSEEK_API_KEY
+# 编辑 agent.yaml，填入你的 API Key
 
-# 运行
+# 启动
 python -m app.cli
-
-# 单次执行
-python -m app.cli --one-shot "帮我写一个快速排序"
-
-# 指定模型
-python -m app.cli --model gpt-4o --provider openai_compat
 ```
 
-## 终端界面
+单次执行：`python -m app.cli --one-shot "你的问题"`
 
-实时终端 UI，对标 Claude Code / OpenCode 体验：
+---
+
+## 终端体验
+
+实时终端 UI，对标 Claude Code / OpenCode：
 
 | 功能 | 说明 |
 |------|------|
-| **流式输出** | 逐字显示 LLM 响应，不再黑屏等待 |
-| **思考状态** | `... 思考中 ...` 实时指示当前阶段 |
-| **工具调用** | 彩色图标徽章 (R/W/E/$/G/S/H/Q/D/M) + 折叠预览 |
-| **多 Agent 面板** | 实时显示子 Agent 运行状态 |
-| **上下文监控** | 状态栏显示模型名、turn 数、token 用量、上下文占用% |
-| **压缩通知** | 上下文压缩时提示用户 |
-| **斜杠命令** | /help /tools /tokens /status /flowchart /clear /exit |
+| 流式输出 | 逐字显示，不再黑屏等半天 |
+| 思考状态 | `... 思考中 ...` 实时指示 |
+| 工具调用 | 彩色图标徽章 + 折叠预览，不再几十行乱码 |
+| 多 Agent 面板 | 实时显示子 Agent 运行状态 |
+| 上下文监控 | 状态栏显示模型名、turn 数、token、上下文占用% |
+| 斜杠命令 | /help /tools /tokens /status /clear /exit |
 
-详见 [可视化.md](可视化.md)。
+---
+
+## 设计参考
+
+融合了 10 个开源 AI Agent 项目的设计精华：
+
+| 项目 | 借鉴了什么 |
+|------|-----------|
+| Claude Code | 双层循环、CLAUDE.md 层级、实时终端 UI |
+| Pi Agent | 子 Agent 进程隔离、类型系统 |
+| Hermes Agent | 线程池委托、多记忆后端 |
+| GenericAgent | L0-L4 记忆公理、技能结晶 |
+| oh-my-opencode | Hook 事件系统、Agent 角色系统 |
+| OpenCode | 终端 TUI、上下文压缩 |
+| everything-claude-code | 48 Agent + 183 Skill 生态设计 |
+| multica | 信号量并发控制 |
+| Synthius-Mem 论文 | 记忆提取 pipeline |
+| Karpathy Wiki 思想 | Wiki 式知识组织 |
+
+---
 
 ## 实现进度
 
@@ -102,81 +220,24 @@ python -m app.cli --model gpt-4o --provider openai_compat
 - 三层上下文压缩 (Prune -> Summary -> Emergency Truncation)
 
 ### Phase 3 -- 多 Agent + 自进化 (已完成)
-- **5 角色协作**: Coordinator / Planner / Coder / Reviewer / Memorizer
-- **隔离存储**: 每个 Agent 独立的 MemoryStore + FactStore + DomainIndex
-- **共享区**: plan.md / status/ / decisions.md / issues.md / skills/ 结构化通信
-- **跨 Agent 读取**: CrossAgentReadTool (路径白名单 + 安全校验)
-- **编排引擎**: orchestrate() 分阶段串并行 + 打回机制
-- **Agent 自动选择**: Overlap Coefficient 匹配, 中文分词
-- **Agent 间通信**: asyncio.Queue 收件箱
-- **技能结晶**: 成功任务 -> quality_score 评估 -> 持久化 YAML
-- **Nudge 提醒**: 每 10 轮自动提醒使用记忆/技能
+- 5 角色协作 (Coordinator / Planner / Coder / Reviewer / Memorizer)
+- 隔离存储 (每个 Agent 独立的 MemoryStore + FactStore + DomainIndex)
+- 共享区 (plan.md / status/ / decisions.md / issues.md / skills/)
+- 跨 Agent 读取 (CrossAgentReadTool + 路径白名单 + 安全校验)
+- 编排引擎 (orchestrate() 分阶段串并行 + 打回机制)
+- Agent 自动选择 (Overlap Coefficient 匹配 + 中文分词)
+- Agent 间通信 (asyncio.Queue 收件箱)
+- 技能结晶 (成功任务 -> quality_score 评估 -> 持久化 YAML)
+- Nudge 提醒 (每 10 轮自动提醒使用记忆/技能)
 
 ### Phase 3.5 -- 终端可视化 (已完成)
-- 流式 Hook 事件驱动实时渲染 (STREAM_TEXT / STREAM_THINKING / TOOL_PROGRESS)
+- 流式 Hook 事件驱动实时渲染
 - 逐字流式文本显示
 - 工具调用彩色图标徽章 + 折叠输出
 - 多 Agent 状态面板
 - 上下文占用% 实时计算 + 压缩通知
 
-## 20 接口全景
-
-| 接口 | 职责 | 状态 |
-|------|------|------|
-| **ITool** | 工具注册 / 并发安全 / 结果预算 | V1 |
-| **IModelProvider** | 模型流式推理 (OpenAI 兼容 + Anthropic) | V1 |
-| **IMemoryBackend** | L0-L4 分层记忆, 关键词检索, jieba 分词 | V1 |
-| **IHook** | 22 事件链, 优先级排序, 异常隔离 | V1 |
-| **ISkill** / **ISkillConfig** | 技能注册 / YAML 加载 / 关键词匹配 | V1 |
-| **IFlowInspector** | AsyncQueue 旁路, 滑动窗口统计 | V1 |
-| **ICapabilityCatalog** / **ICapabilityRegistry** | Tier 渐进式披露, copy-on-read | V2 |
-| **IPluginAdapter** | 4 层发现 / yaml manifest / 热重载 | V2 |
-| **IPromptBuilder** | 片段式动态组装, token 预算 | V2 |
-| **IWebAutomation** | fetch + search + browser (httpx + Playwright) | V2 |
-| **IAgentRuntime** * | spawn/spawn_parallel, 并发控制, Agent 通信 | V3 |
-| **IAutonomousMemory** * | 检查点 + 结晶 + Nudge + 长期更新 | V3 |
-| **ISelfModification** * | quality_score 三维评分 | V3 |
-| **IToolErrorPolicy** | 工具异常策略 | 预留 V2 |
-| **IHotLoader** | 运行时热加载 | 预留 V2 |
-| **IDiscovery** | 自动发现 | 预留 V2 |
-| **IMultiModelOrchestrator** | 多模型协同 | 预留 V3 |
-| **IPluginMarketplace** | 插件市场 | 预留 V3 |
-| **IMetaAgent** | 元 Agent 自优化 | 预留 V4 |
-
-> * = 需求4 核心增量。
-
-## 15 内置工具
-
-| 工具 | 说明 | 图标 |
-|------|------|------|
-| read | 文件读取 | R |
-| write | 文件写入 | W |
-| edit | 文件编辑（字符串替换） | E |
-| bash | Shell 命令执行 | $ |
-| glob | 文件名模式搜索 | G |
-| grep | 文件内容搜索 | S |
-| web_fetch | HTTP 请求 | H |
-| web_search | 网页搜索 | Q |
-| web_browser_* | 浏览器自动化 (6 个子工具) | - |
-| delegate_task | 多 Agent 任务委托 | D |
-| agent_message | Agent 间通信 | M |
-| cross_agent_read | 跨 Agent 只读访问 | X |
-| memory_store | 记忆存储 | - |
-| memory_search | 记忆搜索 | - |
-| skill_lookup | 技能查找 | - |
-
-## 文档索引
-
-### 设计文档
-- [多智能体设计.md](多智能体设计.md) -- Phase 3 多 Agent 系统完整设计方案
-- [可视化.md](可视化.md) -- 终端 UI 设计文档（对标 Claude Code / OpenCode）
-- [记忆系统设计实现.md](记忆系统设计实现.md) -- Phase 1/2 记忆系统设计
-- [架构总结.md](架构总结.md) -- 三层架构详细分析
-
-### 实现记录
-- [多智能实现记录.md](多智能实现记录.md) -- Phase 3 实现过程、问题分析与测试结果 (449 tests)
-- [记忆系统更新记录.md](记忆系统更新记录.md) -- 记忆系统实现记录
-- [修改记录.md](修改记录.md) -- 累计修改日志
+---
 
 ## 安全网
 
@@ -189,27 +250,28 @@ python -m app.cli --model gpt-4o --provider openai_compat
 - 跨 Agent 读取路径白名单 + `..` 穿越防护
 - API Key 不入库 (agent.yaml 在 .gitignore 中)
 
-## 设计参考
-
-| 项目 | 核心借鉴 |
-|------|---------|
-| **Claude Code** | 双层循环, 59 工具, CLAUDE.md 层级, 实时终端 UI |
-| **Pi Agent** | 类型系统 (AgentTool<T>), 子Agent 进程隔离 |
-| **Hermes Agent** | 线程池委托, 8 种记忆后端, 30+ 消息平台 |
-| **GenericAgent** | L0-L4 记忆公理, 技能结晶, 极简循环 |
-| **multica** | Go 信号量并发控制, daemon 轮询 |
-| **oh-my-opencode** | 31+ hooks, 动态 prompt 构建, Agent 角色系统 |
-| **everything-claude-code** | 48 Agent + 183 Skill 生态级设计 |
-| **OpenCode** | 终端 TUI 设计, 上下文压缩, 会话管理 |
+---
 
 ## 测试
 
 ```bash
-# 全量测试
 pytest tests/ -v
-
 # 449 tests, 0 failures
 ```
+
+---
+
+## 文档
+
+| 文档 | 内容 |
+|------|------|
+| [多智能体设计.md](多智能体设计.md) | Phase 3 多 Agent 系统完整设计 |
+| [我的记忆改进.md](我的记忆改进.md) | Wiki 式记忆系统设计 |
+| [多智能实现记录.md](多智能实现记录.md) | Phase 3 实现过程 (449 tests) |
+| [可视化.md](可视化.md) | 终端 UI 设计文档 |
+| [架构总结.md](架构总结.md) | 三层架构分析 |
+
+---
 
 ## License
 
