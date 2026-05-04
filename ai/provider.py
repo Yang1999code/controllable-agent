@@ -21,6 +21,56 @@ from ai.types import Message, ToolDefinition
 logger = logging.getLogger(__name__)
 
 
+# ── 已知模型上下文窗口表 ──────────────────────────────
+# key: 模型名子串匹配 → (context_window, max_output_tokens)
+# 精确匹配优先，再按前缀匹配
+
+KNOWN_MODELS: dict[str, tuple[int, int]] = {
+    # DeepSeek
+    "deepseek-v4-pro":      (1_000_000, 16384),
+    "deepseek-v4-flash":    (1_000_000, 16384),
+    "deepseek-chat":        (1_000_000, 16384),
+    "deepseek-reasoner":    (1_000_000, 16384),
+    # OpenAI
+    "gpt-4o":               (128_000, 16384),
+    "gpt-4o-mini":          (128_000, 16384),
+    "gpt-4-turbo":          (128_000, 4096),
+    "gpt-4":                (8_192, 8192),
+    "gpt-4-32k":            (32_768, 8192),
+    "gpt-3.5-turbo":        (16_385, 4096),
+    "o1":                   (200_000, 32768),
+    "o3-mini":              (200_000, 65536),
+    # Anthropic
+    "claude-opus-4-7":      (1_000_000, 32768),
+    "claude-opus-4-6":      (1_000_000, 32768),
+    "claude-sonnet-4-6":    (1_000_000, 16384),
+    "claude-haiku-4-5":     (200_000, 8192),
+    "claude-opus-4":        (200_000, 16384),
+    "claude-sonnet-4":      (200_000, 16384),
+    # 通义千问
+    "qwen-max":             (32_768, 8192),
+    "qwen-plus":            (131_072, 8192),
+    "qwen-turbo":           (131_072, 8192),
+    "qwen2.5":              (131_072, 8192),
+    # 智谱
+    "glm-4":                (128_000, 8192),
+    "glm-4-plus":           (128_000, 8192),
+}
+
+
+def _lookup_known_model(model: str) -> tuple[int | None, int | None]:
+    """从已知模型表查找上下文窗口和最大输出。精确匹配优先，再前缀匹配。"""
+    model_lower = model.lower()
+    # 精确匹配
+    if model_lower in KNOWN_MODELS:
+        return KNOWN_MODELS[model_lower]
+    # 前缀匹配（处理带日期后缀的，如 claude-sonnet-4-6-20250514）
+    for key, val in KNOWN_MODELS.items():
+        if model_lower.startswith(key):
+            return val
+    return None, None
+
+
 # ── 流式事件 ──────────────────────────────────────────
 
 @dataclass
@@ -48,6 +98,7 @@ class IModelProvider(ABC):
     def __init__(self, model: str = ""):
         self.model = model
         self._context_window_cache: int | None = None
+        self._max_output_override: int | None = None
 
     @abstractmethod
     async def stream(
@@ -77,15 +128,20 @@ class IModelProvider(ABC):
     # ── 上下文窗口（动态查询，问一次缓存）───────────────
 
     async def discover_context_window(self) -> int:
-        """查询模型上下文窗口大小。4 层优先级，结果缓存。"""
+        """查询模型上下文窗口大小。5 层优先级，结果缓存。
+
+        优先级：缓存 > 环境变量 > API 查询 > 已知模型表 > 默认 128K
+        """
         if self._context_window_cache is not None:
             return self._context_window_cache
 
+        # 1. 环境变量覆盖
         env_val = os.getenv("MY_AGENT_MAX_CONTEXT_TOKENS")
         if env_val:
             self._context_window_cache = int(env_val)
             return self._context_window_cache
 
+        # 2. 调 API 问（如果提供商实现了）
         try:
             discovered = await self._fetch_model_context_window()
             if discovered:
@@ -94,7 +150,20 @@ class IModelProvider(ABC):
         except Exception:
             pass
 
+        # 3. 已知模型表匹配
+        ctx, max_out = _lookup_known_model(self.model)
+        if ctx is not None:
+            self._context_window_cache = ctx
+            if max_out is not None:
+                self._max_output_override = max_out
+            logger.info("matched known model %s: context=%d max_out=%s",
+                        self.model, ctx, max_out)
+            return self._context_window_cache
+
+        # 4. 默认值
         self._context_window_cache = self._default_context_window()
+        logger.warning("unknown model %s, using default context=%d",
+                       self.model, self._context_window_cache)
         return self._context_window_cache
 
     @abstractmethod
@@ -106,7 +175,7 @@ class IModelProvider(ABC):
 
     @property
     def max_output_tokens(self) -> int:
-        return 8192
+        return self._max_output_override or 8192
 
     @property
     def usable_context(self) -> int:
@@ -318,18 +387,31 @@ class OpenAICompatibleProvider(IModelProvider):
         """问 API 模型信息端点，提取上下文窗口大小。"""
         try:
             client = await self._get_client()
+            # 先试精确查询 /models/{model}
             resp = await client.get(f"{self.base_url}/models/{self.model}")
-            if resp.status_code != 200:
-                return None
-            data = resp.json()
-            for key in ("max_context_tokens", "context_window", "max_input_tokens", "context_length"):
-                if key in data:
-                    return int(data[key])
-            info = data.get("model_info", {})
-            if isinstance(info, dict):
-                for key in ("max_context_tokens", "context_window", "max_input_tokens"):
-                    if key in info:
-                        return int(info[key])
+            if resp.status_code == 200:
+                data = resp.json()
+                for key in ("max_context_tokens", "context_window",
+                            "max_input_tokens", "context_length"):
+                    if key in data:
+                        return int(data[key])
+                info = data.get("model_info", {})
+                if isinstance(info, dict):
+                    for key in ("max_context_tokens", "context_window", "max_input_tokens"):
+                        if key in info:
+                            return int(info[key])
+
+            # 精确查询失败，试 /models 列表匹配
+            resp = await client.get(f"{self.base_url}/models")
+            if resp.status_code == 200:
+                data = resp.json()
+                for m in data.get("data", []):
+                    mid = m.get("id", "")
+                    if mid == self.model or self.model.startswith(mid):
+                        for key in ("max_context_tokens", "context_window",
+                                    "max_input_tokens", "context_length"):
+                            if key in m:
+                                return int(m[key])
         except Exception:
             pass
         return None
@@ -479,7 +561,8 @@ class AnthropicProvider(IModelProvider):
                 return
 
     async def _fetch_model_context_window(self) -> int | None:
-        return None  # Anthropic 没有模型信息查询端点
+        # Anthropic 没有模型信息查询端点，由父类已知模型表兜底
+        return None
 
     async def chat(
         self,
