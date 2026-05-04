@@ -536,6 +536,7 @@ class AgentRuntime(IAgentRuntime):
 
     async def orchestrate(
         self, user_request: str, max_retries: int = 3,
+        memory_extractor=None,
     ) -> list[SubAgentResult]:
         """分阶段串并行编排多 Agent 协作。
 
@@ -543,11 +544,16 @@ class AgentRuntime(IAgentRuntime):
         Phase A: await planner（串行）
         Phase B: gather(coder+reviewer配对, memorizer, coordinator)（并行）
         Phase C: await reviewer_final 总体集成测试（串行）
+        Phase C+: await reviewer_adversarial 对抗审查（串行）
+        Phase Fix: coder 修复对抗发现的问题（串行，最多 2 轮）
+        Phase Verify: reviewer 验证修复（串行）
         Phase D: await memorizer_final 总结（串行）
+        Phase Memory: 统一记忆提取
 
         打回机制：Phase C 不通过 → 回到 Phase B（最多 max_retries 轮）
         """
         all_results: list[SubAgentResult] = []
+        session_id = uuid4().hex[:8]
 
         # Phase A: Planner（串行，写 plan.md）
         planner_result = await self.spawn(
@@ -619,6 +625,47 @@ class AgentRuntime(IAgentRuntime):
         )
         all_results.append(adversarial_result)
 
+        # Phase Fix+Verify: 修复对抗发现的问题并验证（最多 2 轮）
+        fix_rounds = 0
+        max_fix_rounds = 2
+        while fix_rounds < max_fix_rounds:
+            # 检查 shared/issues.md 是否有 CRITICAL/HIGH 问题
+            has_critical_issues = await self._check_critical_issues()
+            if not has_critical_issues:
+                logger.info("No critical issues found, skipping fix round")
+                break
+
+            fix_rounds += 1
+            logger.info("Fix round %d/%d: addressing critical issues", fix_rounds, max_fix_rounds)
+
+            # Phase Fix: Coder 修复问题
+            fix_result = await self.spawn(
+                agent_type="coder",
+                task=(
+                    "读取 shared/issues.md，修复其中标记为 CRITICAL 和 HIGH 的所有问题。\n"
+                    "修复后运行 pytest 确认没有引入新问题。\n"
+                    "修复完成后清空 shared/issues.md 中的已修复条目。"
+                ),
+                context={"agent_id": f"coder_fix_{fix_rounds:03d}"},
+                current_depth=1,
+            )
+            all_results.append(fix_result)
+
+            # Phase Verify: Reviewer 验证修复
+            verify_result = await self.spawn(
+                agent_type="reviewer",
+                task=(
+                    "验证刚才的修复：\n"
+                    "1) 运行完整测试套件 pytest <项目>/tests/ -v\n"
+                    "2) 确认所有测试通过\n"
+                    "3) 检查修复是否引入新问题\n"
+                    "4) 如果仍有问题，记录到 shared/issues.md"
+                ),
+                context={"agent_id": f"reviewer_verify_{fix_rounds:03d}"},
+                current_depth=1,
+            )
+            all_results.append(verify_result)
+
         # Phase D: Memorizer 最终总结
         phase_d_result = await self.spawn(
             agent_type="memorizer",
@@ -628,4 +675,39 @@ class AgentRuntime(IAgentRuntime):
         )
         all_results.append(phase_d_result)
 
+        # Phase Memory: 统一记忆提取（orchestrate 完成后）
+        if memory_extractor is not None:
+            try:
+                extraction = await memory_extractor.extract_from_orchestration(
+                    user_request=user_request,
+                    results=all_results,
+                    session_id=session_id,
+                )
+                if extraction.success:
+                    logger.info("orchestration memory extracted: digest=%s wiki=%s",
+                                extraction.digest_id, extraction.wiki_id)
+            except Exception as e:
+                logger.warning("orchestration memory extraction failed (non-fatal): %s", e)
+
         return all_results
+
+    async def _check_critical_issues(self) -> bool:
+        """检查 shared/issues.md 是否有未修复的 CRITICAL/HIGH 问题。"""
+        if not self._shared_space:
+            return False
+        try:
+            store = self._shared_space._store
+            issues_path = store.root_path / "shared" / "issues.md"
+            if not issues_path.exists():
+                return False
+            content = issues_path.read_text(encoding="utf-8")
+            # 查找 CRITICAL 或 HIGH 标记
+            for line in content.split("\n"):
+                line_upper = line.upper()
+                if "CRITICAL" in line_upper or "HIGH" in line_upper:
+                    # 排除已标记为修复的行
+                    if "FIXED" not in line_upper and "RESOLVED" not in line_upper:
+                        return True
+            return False
+        except Exception:
+            return False

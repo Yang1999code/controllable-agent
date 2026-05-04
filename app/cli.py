@@ -331,6 +331,7 @@ async def main():
             "_skill_registry": skill_registry,
             "_runtime": runtime,
             "_hooks": hooks,
+            "_memory_extractor": memory_extractor,
             "agent_id": "main",
         },
     )

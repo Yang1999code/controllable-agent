@@ -191,6 +191,99 @@ class MemoryExtractor:
             wiki_id=wiki_result or "",
         )
 
+    async def extract_from_orchestration(
+        self,
+        user_request: str,
+        results: list,
+        session_id: str,
+    ) -> ExtractionResult:
+        """从 orchestrate 结果直接提取 digest（跳过 TaskDetector）。
+
+        将所有子 Agent 的输出汇总为一条 digest，记录协作经验。
+        """
+        # 构建协作摘要文本
+        summary_parts = [f"用户需求: {user_request}\n"]
+        total_tools = 0
+        total_duration = 0
+        role_reports = []
+
+        for r in results:
+            if not hasattr(r, "agent_type"):
+                continue
+            status = getattr(r, "status", "unknown")
+            duration = getattr(r, "duration_ms", 0)
+            total_duration += duration
+            usage = getattr(r, "usage", {})
+            total_tools += usage.get("input_tokens", 0)
+            output_preview = (getattr(r, "output", "") or "")[:300]
+            error = getattr(r, "error", None)
+
+            role_line = f"- {getattr(r, 'agent_type', '?')}({getattr(r, 'task_id', '?')}): {status}, {duration}ms"
+            if error:
+                role_line += f", error={error[:100]}"
+            role_reports.append(role_line)
+
+        summary_parts.append(f"子 Agent 数: {len(results)}, 总耗时: {total_duration}ms")
+        summary_parts.append("\n角色执行结果:")
+        summary_parts.extend(role_reports)
+
+        orchestration_summary = "\n".join(summary_parts)
+
+        # 构造消息，让 LLM 提取 digest
+        llm_messages = [
+            Message(role="user", content=(
+                f"请从以下多 Agent 协作记录中提取记忆：\n\n{orchestration_summary}\n\n"
+                f"重点提取：1) 任务完成状态 2) 各角色执行效果 3) 发现的问题 4) 可复用经验"
+            )),
+        ]
+
+        try:
+            events = await self.provider.chat(
+                messages=llm_messages,
+                tools=[],
+                system_prompt=_DIGEST_SYSTEM_PROMPT,
+                max_tokens=2000,
+            )
+        except Exception as e:
+            logger.error("orchestration digest extraction failed: %s", e)
+            return ExtractionResult(success=False, reason=f"llm_error: {e}")
+
+        response_text = ""
+        for event in events:
+            if event.type == "text_delta":
+                response_text += event.content
+            elif event.type == "error":
+                return ExtractionResult(success=False, reason=f"llm_error: {event.error}")
+
+        parsed = self._parse_json_response(response_text)
+        if parsed is None:
+            return ExtractionResult(success=False, reason="json_parse_failed")
+
+        facts = parsed.get("facts", [])
+        if not facts:
+            return ExtractionResult(success=False, reason="no_valuable_facts")
+
+        digest_id = await self.fact_store.next_digest_id()
+        entry = await self.fact_store.create_digest(
+            digest_id=digest_id,
+            source_session=session_id,
+            task_summary=parsed.get("task_summary", ""),
+            domains=parsed.get("domains", ["task"]),
+            tags=parsed.get("tags", []),
+            facts=facts,
+            body=parsed.get("body", ""),
+        )
+
+        await self.domain_index.update_index_for(entry)
+
+        wiki_result = await self._check_and_merge_wiki(entry)
+
+        return ExtractionResult(
+            success=True,
+            digest_id=digest_id,
+            wiki_id=wiki_result or "",
+        )
+
     async def _check_and_merge_wiki(self, new_digest: FactEntry) -> str | None:
         """检查同主题 digest 是否达到合并阈值。
 

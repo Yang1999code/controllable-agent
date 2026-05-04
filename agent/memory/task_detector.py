@@ -74,5 +74,13 @@ class TaskDetector:
         if len(text) <= 10 and not had_tool_calls:
             return TaskDetection(is_complete=True, confidence=0.6, reason="short_reply_no_tools")
 
-        # 5. 默认：任务未完成
+        # 5. 多轮工具调用后任务完成：3+ 轮工具调用后模型给出纯文本回答
+        if had_tool_calls and turn_count >= 3:
+            return TaskDetection(is_complete=True, confidence=0.7, reason="complex_task_done")
+
+        # 6. 多轮对话但有工具调用 = 可能还在做复杂任务，不判断完成
+        if turn_count >= 2 and had_tool_calls:
+            return TaskDetection(is_complete=False, confidence=0.5, reason="active_tool_usage")
+
+        # 7. 默认：任务未完成
         return TaskDetection(is_complete=False, confidence=0.4, reason="default")
