@@ -284,6 +284,7 @@ class AgentLoop:
                         total_output_tokens += event.usage.get("output_tokens", 0)
                     elif event.type == "error":
                         logger.error(f"LLM error: {event.error}")
+                        current_tool_calls.clear()
                         break
 
                 # 没有工具调用 → 退出内层循环

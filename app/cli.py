@@ -313,6 +313,9 @@ async def main():
             "project_path": ".",
             "_web": web,
             "_skill_registry": skill_registry,
+            "_runtime": runtime,
+            "_hooks": hooks,
+            "agent_id": "main",
         },
     )
 

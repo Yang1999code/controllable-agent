@@ -154,8 +154,75 @@ _spinner_idx = 0
 def _spinner_frame() -> str:
     global _spinner_idx
     frame = SPINNER_CHARS[_spinner_idx % len(SPINNER_CHARS)]
-    _spinner_idx += 1
+    _spinner_idx = (_spinner_idx + 1) % len(SPINNER_CHARS)
     return frame
+
+
+# ── Spinner 动画 ────────────────────────────────────────
+
+import asyncio
+import threading
+
+
+class Spinner:
+    """后台 spinner 动画。在 asyncio 事件循环中每 200ms 刷新。
+
+    用法：
+        spinner = Spinner("思考中")
+        spinner.start()
+        ... 做耗时操作 ...
+        spinner.stop()
+    """
+
+    FRAMES = ["◐", "◓", "◑", "◒"]
+    ASCII_FRAMES = ["|", "/", "-", "\\"]
+
+    def __init__(self, message: str = "思考中", interval: float = 0.2):
+        self._message = message
+        self._interval = interval
+        self._task: asyncio.Task | None = None
+        self._running = False
+        self._use_unicode = False  # ASCII safe by default
+
+    def _supports_unicode(self) -> bool:
+        return self._use_unicode
+
+    def start(self):
+        self._running = True
+        try:
+            loop = asyncio.get_running_loop()
+            self._task = loop.create_task(self._spin())
+        except RuntimeError:
+            self._running = False
+
+    def stop(self):
+        self._running = False
+        if self._task and not self._task.done():
+            self._task.cancel()
+
+    async def _spin(self):
+        frames = self.FRAMES if self._use_unicode else self.ASCII_FRAMES
+        idx = 0
+        try:
+            while self._running:
+                frame = frames[idx % len(frames)]
+                idx += 1
+                line = f"\r  {YELLOW}{frame}{RESET} {DIM}{self._message}...{RESET}   "
+                _safe_write(line)
+                sys.stdout.flush()
+                await asyncio.sleep(self._interval)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            _safe_write("\r" + " " * _term_width() + "\r")
+            sys.stdout.flush()
+
+
+def _supports_unicode() -> bool:
+    try:
+        return sys.stdout.encoding and sys.stdout.encoding.lower() in ("utf-8", "utf8")
+    except Exception:
+        return False
 
 
 # ── 终端控制 ────────────────────────────────────────────

@@ -150,20 +150,188 @@ app/         ← CLI + 15 内置工具 + 模型适配器 + 配置 + TUI
 
 ## 快速开始
 
+### 1. 下载安装
+
 ```bash
 git clone https://github.com/Yang1999code/controllable-agent.git
 cd controllable-agent
 pip install -e .
+```
 
-# 配置 API Key
+> 需要 Python 3.12+，建议使用 conda 或 venv 隔离环境。
+
+### 2. 配置 API Key
+
+```bash
+# 复制配置模板
 cp app/config/agent.yaml.example app/config/agent.yaml
-# 编辑 agent.yaml，填入你的 API Key
+```
 
-# 启动
+编辑 `app/config/agent.yaml`，填入你的 API Key：
+
+```yaml
+providers:
+  default: openai_compat
+  openai_compat:
+    base_url: https://api.deepseek.com/v1    # 或其他 OpenAI 兼容 API
+    model: deepseek-chat
+    api_key_env: DEEPSEEK_API_KEY             # 从环境变量读取
+    # api_key: sk-xxx                         # 或直接填（不要提交到 git）
+```
+
+设置环境变量：
+
+```bash
+# Linux / macOS
+export DEEPSEEK_API_KEY=sk-your-key-here
+
+# Windows PowerShell
+$env:DEEPSEEK_API_KEY = "sk-your-key-here"
+
+# Windows CMD
+set DEEPSEEK_API_KEY=sk-your-key-here
+```
+
+> 支持 **DeepSeek / 通义千问 / 智谱 / OpenAI / Anthropic** 等任何 OpenAI 兼容模型。
+
+### 3. 启动
+
+```bash
 python -m app.cli
 ```
 
-单次执行：`python -m app.cli --one-shot "你的问题"`
+你会看到欢迎界面：
+
+```
++==================================================+
+|  my-agent v0.1.0                                 |
+|  Empire Code -- 可控多智能体自迭代 Agent 框架     |
++==================================================+
+
+  底层模型: deepseek-chat
+  可用工具: 15 个
+  /help | /flowchart | /exit | /多智能体
+  运行中随时可输入补充信息
+```
+
+其他启动方式：
+
+```bash
+# 单次执行（非交互）
+python -m app.cli --one-shot "你的问题"
+
+# 指定模型
+python -m app.cli --model gpt-4o
+
+# 详细日志（调试用）
+python -m app.cli -v
+
+# 旧版简单 REPL
+python -m app.cli --legacy
+```
+
+### 4. 使用多智能体协作
+
+进入 TUI 后，输入 `/多智能体` 启动多 Agent 模式：
+
+```
+> /多智能体
+
+  === 多智能体协作模式 ===
+
+  已注册角色 (5):
+    [C] coordinator    协调者 — 多 Agent 调度、流程监控
+    [P] planner        规划者 — 任务分解、步骤规划
+    [X] coder          编码者 — 代码实现、文件操作
+    [R] reviewer       审查者 — 代码审查、测试验证
+    [M] memorizer      记忆者 — 经验总结、知识提取
+
+  请描述你要多智能体协作完成的任务：
+  任务> 写一个 Python 文本统计工具，统计字符数、词数、行数，并写测试
+```
+
+然后 5 个 Agent 自动分工：
+
+```
+  [Agents: ~planner -coordinator -coder -reviewer -memorizer]
+    > planner started (planner_001)
+    OK planner finished (2.3s)
+  [Agents: *planner ~coordinator ~coder ~reviewer ~memorizer]
+    > coordinator started (coordinator_001)
+    > coder started (coder_001)
+    ...
+```
+
+面板图标含义：`~` 运行中、`*` 已完成、`!` 出错、`-` 等待中。
+
+也可以让模型自动调用——在普通对话中描述复杂任务，模型会自行决定是否使用多 Agent。
+
+### 5. 记忆系统管理
+
+Agent 会自动从对话中提取记忆，存储在 `~/.agent-memory/` 目录下：
+
+```
+~/.agent-memory/
+├── digest/           # 任务摘要（每次完成后自动提取）
+│   ├── d_001.md
+│   ├── d_002.md
+│   └── ...
+├── wiki/             # 知识页面（同主题摘要自动合并）
+│   ├── python_stack.md
+│   └── ...
+├── domain/           # 四域分类索引
+│   ├── conversational/
+│   ├── personal/
+│   ├── agent/
+│   └── task/
+└── index.md          # 倒排索引（关键词 → 摘要/知识页）
+```
+
+**查看记忆内容**：直接用任何编辑器打开 Markdown 文件，人可读。
+
+```
+---
+id: d_001
+level: digest
+tags: [python, file-io]
+domains: [conversational]
+confidence: 0.85
+---
+
+## 实现了文本统计工具
+
+- 使用 collections.Counter 统计字符频率
+- 支持自定义编码检测
+- 写了 10 个 unittest 用例全部通过
+```
+
+**搜索记忆**：在对话中提问，Agent 会自动检索相关记忆。
+
+**记忆生命周期**：
+
+```
+对话完成 → 自动提取 digest（任务摘要）
+    ↓ 积累 5+ 个同主题 digest
+自动合并为 wiki（知识页面，更完整）
+    ↓ 下次遇到类似问题
+优先查 wiki → 查不到再查 digest → 都没有就不编造
+```
+
+### 6. 常用命令速查
+
+| 命令 | 说明 |
+|------|------|
+| `/help` | 显示所有命令 |
+| `/多智能体` | 启动多 Agent 协作模式 |
+| `/tools` | 列出所有工具 |
+| `/tokens` | 查看 Token 使用统计 |
+| `/status` | 查看 Agent 运行状态 |
+| `/model` | 显示当前模型 |
+| `/flowchart` | 查看控制流程图 |
+| `/clear` | 清屏 |
+| `/exit` | 退出 |
+
+运行中随时可以直接打字输入补充信息，Agent 下一轮会看到。
 
 ---
 

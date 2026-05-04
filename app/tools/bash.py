@@ -4,12 +4,17 @@
 is_concurrency_safe=False —— 多个 shell 并行会冲突。
 
 跨平台：Windows 自动使用 cmd.exe，Linux/macOS 使用 bash。
+Windows 编码修复：强制 PYTHONUTF8=1 + chcp 65001。
 """
 
 import asyncio
+import os
+import sys
 from pathlib import Path
 
 from ai.types import Context, ToolDefinition, ToolParameter, ToolResult
+
+_IS_WINDOWS = sys.platform == "win32"
 
 
 class BashTool:
@@ -37,11 +42,22 @@ class BashTool:
 
         try:
             cwd = str(Path(workdir).resolve()) if workdir else None
+
+            # 构建子进程环境：强制 UTF-8
+            env = os.environ.copy()
+            env["PYTHONUTF8"] = "1"
+            env["PYTHONIOENCODING"] = "utf-8"
+
+            # Windows 下先切换代码页
+            if _IS_WINDOWS:
+                command = f"chcp 65001 >nul 2>&1 & {command}"
+
             proc = await asyncio.create_subprocess_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
+                env=env,
             )
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 proc.communicate(), timeout=timeout
