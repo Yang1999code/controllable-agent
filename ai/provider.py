@@ -26,12 +26,15 @@ logger = logging.getLogger(__name__)
 # 精确匹配优先，再按前缀匹配
 
 KNOWN_MODELS: dict[str, tuple[int, int]] = {
-    # DeepSeek
+    # DeepSeek V4（API 不返回窗口信息，官方文档确认 1M context）
     "deepseek-v4-pro":      (1_000_000, 16384),
     "deepseek-v4-flash":    (1_000_000, 16384),
     "deepseek-chat":        (1_000_000, 16384),
     "deepseek-reasoner":    (1_000_000, 16384),
     # OpenAI
+    "gpt-4.1":              (1_000_000, 128_000),
+    "gpt-4.1-mini":         (1_000_000, 128_000),
+    "gpt-4.1-nano":         (1_000_000, 128_000),
     "gpt-4o":               (128_000, 16384),
     "gpt-4o-mini":          (128_000, 16384),
     "gpt-4-turbo":          (128_000, 4096),
@@ -40,21 +43,28 @@ KNOWN_MODELS: dict[str, tuple[int, int]] = {
     "gpt-3.5-turbo":        (16_385, 4096),
     "o1":                   (200_000, 32768),
     "o3-mini":              (200_000, 65536),
-    # Anthropic
-    "claude-opus-4-7":      (1_000_000, 32768),
-    "claude-opus-4-6":      (1_000_000, 32768),
-    "claude-sonnet-4-6":    (1_000_000, 16384),
-    "claude-haiku-4-5":     (200_000, 8192),
-    "claude-opus-4":        (200_000, 16384),
-    "claude-sonnet-4":      (200_000, 16384),
-    # 通义千问
+    # Anthropic（官方文档 platform.claude.com/docs/en/about-claude/models/overview）
+    "claude-opus-4-7":      (1_000_000, 128_000),
+    "claude-opus-4-6":      (1_000_000, 128_000),
+    "claude-sonnet-4-6":    (1_000_000, 64_000),
+    "claude-haiku-4-5":     (200_000, 64_000),
+    "claude-opus-4":        (200_000, 64_000),
+    "claude-sonnet-4":      (200_000, 64_000),
+    # 通义千问（阿里云百炼平台）
     "qwen-max":             (32_768, 8192),
     "qwen-plus":            (131_072, 8192),
     "qwen-turbo":           (131_072, 8192),
+    "qwen-long":            (1_000_000, 8192),
     "qwen2.5":              (131_072, 8192),
-    # 智谱
-    "glm-4":                (128_000, 8192),
-    "glm-4-plus":           (128_000, 8192),
+    "qwen3-max":            (131_072, 16384),
+    "qwen3.5-plus":         (131_072, 16384),
+    # 智谱（官方文档 docs.bigmodel.cn）
+    "glm-4":                (128_000, 4096),
+    "glm-4-plus":           (128_000, 4096),
+    "glm-4-long":           (1_000_000, 4096),
+    "glm-4.5":              (128_000, 16384),
+    "glm-4.6":              (200_000, 128_000),
+    "glm-4.7":              (200_000, 128_000),
 }
 
 
