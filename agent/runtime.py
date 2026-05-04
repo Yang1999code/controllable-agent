@@ -572,7 +572,9 @@ class AgentRuntime(IAgentRuntime):
                  "context": {"agent_id": "memorizer_001"}, "current_depth": 1},
                 {"agent_type": "coder", "task": "按 plan.md 执行代码实现",
                  "context": {"agent_id": "coder_001"}, "current_depth": 1},
-                {"agent_type": "reviewer", "task": "模块级快速验证，和 coder_001 配对",
+                {"agent_type": "reviewer",
+                 "task": ("读取 Coder 已写的代码，检查类型注解和方法名遮蔽问题，"
+                          "运行已有测试验证通过，发现问题写入 shared/issues.md"),
                  "context": {"agent_id": "reviewer_001"}, "current_depth": 1},
             ]
             phase_b_results = await self.spawn_parallel(phase_b_tasks)
@@ -581,7 +583,10 @@ class AgentRuntime(IAgentRuntime):
             # Phase C: 总体集成测试（串行）
             phase_c_result = await self.spawn(
                 agent_type="reviewer",
-                task="执行总体集成测试：跑全量测试、检查模块间接口、验证整体架构一致性",
+                task=("执行总体集成测试：1) 用 glob 找到项目目录 "
+                      "2) 运行 pytest <目录>/tests/ -v "
+                      "3) 如果测试失败，分析失败原因并记录到 shared/issues.md "
+                      "4) 检查所有模块导入和接口一致性"),
                 context={"agent_id": "reviewer_final"},
                 current_depth=1,
             )
@@ -595,6 +600,24 @@ class AgentRuntime(IAgentRuntime):
                             attempt + 1, max_retries)
             else:
                 logger.warning("Max retries reached (%d), marking ESCALATE", max_retries)
+
+        # Phase C+: 对抗测试（红队审查）——故意找 bug
+        adversarial_result = await self.spawn(
+            agent_type="reviewer",
+            task=(
+                "你是红队审查员，目标是用一切手段找到代码中的 bug：\n"
+                "1) 运行 pytest 看是否有测试失败\n"
+                "2) 检查代码中是否有类型注解 bug（方法名遮蔽内置类型如 list/dict/set/input）\n"
+                "3) 检查是否有缺少 from __future__ import annotations 的文件\n"
+                "4) 检查测试 fixture 是否正确（Path vs str 问题）\n"
+                "5) 检查是否有边界条件未处理（空输入、None、越界）\n"
+                "6) 检查是否有安全隐患（路径穿越、命令注入）\n"
+                "7) 找到的所有问题记录到 shared/issues.md，标明严重级别"
+            ),
+            context={"agent_id": "reviewer_adversarial"},
+            current_depth=1,
+        )
+        all_results.append(adversarial_result)
 
         # Phase D: Memorizer 最终总结
         phase_d_result = await self.spawn(

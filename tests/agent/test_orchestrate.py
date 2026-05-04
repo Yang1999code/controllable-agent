@@ -172,7 +172,7 @@ class TestSpawnEnhancement:
     async def test_spawn_respects_role_max_turns(self, tmp_workspace):
         """验证 spawn 为不同角色分配不同的 max_turns。"""
         runtime, factory, shared_space = _make_runtime(tmp_workspace)
-        for name, mt in [("coordinator", 20), ("planner", 15), ("coder", 30)]:
+        for name, mt in [("coordinator", 20), ("planner", 20), ("coder", 50)]:
             runtime.register_agent_type(AgentTypeConfig(
                 name=name, description=name,
                 system_prompt=f"You are {name}.", tools_whitelist=[],
@@ -181,8 +181,8 @@ class TestSpawnEnhancement:
 
         # 不同角色的 max_turns 应不同
         assert runtime._get_max_turns("coordinator") == 20
-        assert runtime._get_max_turns("planner") == 15
-        assert runtime._get_max_turns("coder") == 30
+        assert runtime._get_max_turns("planner") == 20
+        assert runtime._get_max_turns("coder") == 50
         assert runtime._get_max_turns("unknown") == 50
 
 

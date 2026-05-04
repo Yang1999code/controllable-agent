@@ -19,10 +19,10 @@ MULTI_AGENT_ROLES = ("coordinator", "planner", "coder", "reviewer", "memorizer")
 # 角色 max_turns 配置（覆盖 YAML 中的 max_tokens）
 ROLE_MAX_TURNS: dict[str, int] = {
     "coordinator": 20,
-    "planner": 15,
-    "coder": 30,
-    "reviewer": 20,
-    "memorizer": 10,
+    "planner": 20,
+    "coder": 50,
+    "reviewer": 25,
+    "memorizer": 15,
 }
 
 # 角色 max_tool_calls_per_turn 配置
@@ -30,8 +30,8 @@ ROLE_MAX_TURNS: dict[str, int] = {
 ROLE_MAX_TOOL_CALLS: dict[str, int] = {
     "coordinator": 15,
     "planner": 20,
-    "coder": 30,
-    "reviewer": 20,
+    "coder": 50,
+    "reviewer": 30,
     "memorizer": 10,
 }
 
