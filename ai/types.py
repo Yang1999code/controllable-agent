@@ -118,6 +118,11 @@ class AgentEventType(Enum):
     CONTEXT_COMPACTION = "context_compaction"
     # 记忆提取
     TASK_COMPLETE = "task_complete"
+    # 实时流式事件（TUI 用）
+    STREAM_TEXT = "stream_text"
+    STREAM_THINKING = "stream_thinking"
+    TOOL_PROGRESS = "tool_progress"
+    AGENT_STATUS = "agent_status"
 
 
 @dataclass

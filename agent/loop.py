@@ -243,6 +243,12 @@ class AgentLoop:
 
                 effective_max = self.config.max_context_tokens or self.provider.usable_context
                 max_tokens = min(effective_max, self.provider.usable_context)
+                # 发射思考状态事件
+                await self.hooks.fire(AgentEvent(
+                    type=AgentEventType.STREAM_THINKING,
+                    data={"turn": turn_count, "phase": "thinking"},
+                ))
+
                 async for event in self.provider.stream(
                     messages=context.messages,
                     tools=tool_defs,
@@ -251,12 +257,22 @@ class AgentLoop:
                 ):
                     if event.type == "text_delta":
                         current_text += event.content
+                        # 实时流式文本事件
+                        await self.hooks.fire(AgentEvent(
+                            type=AgentEventType.STREAM_TEXT,
+                            data={"text": event.content, "accumulated": current_text},
+                        ))
                     elif event.type == "tool_call":
                         current_tool_calls.append({
                             "tool_name": event.tool_name,
                             "tool_id": event.tool_id,
                             "args": {},
                         })
+                        # 工具开始事件
+                        await self.hooks.fire(AgentEvent(
+                            type=AgentEventType.TOOL_PROGRESS,
+                            data={"tool_name": event.tool_name, "status": "started"},
+                        ))
                     elif event.type == "tool_call_args":
                         if current_tool_calls:
                             current_tool_calls[-1]["_args_raw"] = (
@@ -330,7 +346,24 @@ class AgentLoop:
                         pass
 
                 # 执行工具
+                for tc in current_tool_calls:
+                    await self.hooks.fire(AgentEvent(
+                        type=AgentEventType.TOOL_PROGRESS,
+                        data={"tool_name": tc.get("tool_name", "?"), "status": "executing"},
+                    ))
                 results = await self.tools.execute_many(current_tool_calls, context)
+
+                # 发射工具完成事件
+                for tc, result in zip(current_tool_calls, results):
+                    await self.hooks.fire(AgentEvent(
+                        type=AgentEventType.TOOL_PROGRESS,
+                        data={
+                            "tool_name": result.tool_name,
+                            "status": "done",
+                            "success": result.success,
+                            "output_preview": (result.content or result.error or "")[:200],
+                        },
+                    ))
 
                 # 注入工具结果到上下文
                 for tc, result in zip(current_tool_calls, results):

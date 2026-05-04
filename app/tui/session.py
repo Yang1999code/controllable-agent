@@ -8,6 +8,13 @@ Scrollback 模式：
 - prompt_toolkit 处理底部输入行
 - 无 alt screen 切换，无清屏操作
 
+实时渲染：
+- 通过 Hook 订阅 AgentLoop 的流式事件（STREAM_TEXT / STREAM_THINKING / TOOL_PROGRESS）
+- 流式文本逐字显示
+- 思考状态实时指示
+- 工具调用折叠展示
+- 多 Agent 状态面板
+
 斜杠命令通过 COMMANDS 注册表管理，插件可通过 register_command 装饰器扩展。
 
 参考：CCB scrollback 模式 / OpenCode session 视图。
@@ -16,13 +23,17 @@ Scrollback 模式：
 import asyncio
 import logging
 import sys
+import threading
 from typing import TYPE_CHECKING, Callable
 
+from ai.types import AgentEvent, AgentEventType
+
 from app.tui.display import (
-    RESET, BOLD, DIM,
+    RESET, BOLD, DIM, ITALIC,
     CYAN, GREEN, YELLOW, RED,
     BRIGHT_GREEN, BRIGHT_BLUE, BRIGHT_YELLOW,
-    GRAY,
+    BRIGHT_CYAN, BRIGHT_MAGENTA, GRAY, BRIGHT_RED,
+    BG_GRAY,
     _term_width, _divider,
     format_user_message,
     format_tool_call, format_tool_result,
@@ -34,6 +45,7 @@ from app.tui.input_area import InputHandler
 if TYPE_CHECKING:
     from agent.loop import AgentLoop, AgentResult
     from ai.types import Context
+    from agent.hook import HookChain, HookHandler
 
 logger = logging.getLogger(__name__)
 
@@ -51,11 +63,41 @@ def register_command(name: str, description: str):
     return decorator
 
 
+# ── 工具图标映射 ──────────────────────────────────────────
+
+_TOOL_ICONS = {
+    "read": ("R", BRIGHT_CYAN),
+    "write": ("W", BRIGHT_GREEN),
+    "edit": ("E", BRIGHT_YELLOW),
+    "bash": ("$", GREEN),
+    "glob": ("G", BRIGHT_MAGENTA),
+    "grep": ("S", BRIGHT_MAGENTA),
+    "web_fetch": ("H", BRIGHT_BLUE),
+    "web_search": ("Q", BRIGHT_BLUE),
+    "delegate_task": ("D", BRIGHT_MAGENTA),
+    "agent_message": ("M", BRIGHT_CYAN),
+    "cross_agent_read": ("X", BRIGHT_CYAN),
+}
+
+_DEFAULT_TOOL_ICON = ("*", BRIGHT_GREEN)
+
+
+def _tool_badge(tool_name: str) -> str:
+    icon, color = _TOOL_ICONS.get(tool_name, _DEFAULT_TOOL_ICON)
+    return f"{BG_GRAY}{color}{BOLD}[{icon}]{RESET}"
+
+
+# ── TUI 会话 ──────────────────────────────────────────────
+
 class TuiSession:
-    """TUI 会话（Scrollback 模式）。
+    """TUI 会话（Scrollback 模式 + 实时 Hook 驱动）。
 
     所有消息累积在终端滚动缓冲区中，quit 后仍可回看。
-    通过 AgentLoop 公共属性获取状态，不穿透内部实现。
+    通过 Hook 订阅 AgentLoop 的实时事件，实现：
+    - 思考状态指示（◐ 思考中...）
+    - 流式文本逐字显示
+    - 工具调用折叠展示（工具名 + 状态 + 简短预览）
+    - 多 Agent 状态面板
     """
 
     def __init__(self, loop: "AgentLoop", context: "Context"):
@@ -67,12 +109,193 @@ class TuiSession:
         self._total_otokens = 0
         self._running = True
 
+        # 实时渲染状态
+        self._is_streaming = False
+        self._stream_buffer = ""
+        self._last_line_was_thinking = False
+        self._current_tools: list[str] = []
+        self._thinking_shown = False
+
+        # 多 Agent 状态
+        self._agent_statuses: dict[str, str] = {}  # agent_name -> status
+
+        # 注册 Hook 监听器
+        self._register_hooks()
+
+    def _register_hooks(self):
+        from agent.hook import HookHandler
+
+        hooks = self._loop.hooks
+        hooks.register(HookHandler(
+            name="tui_stream_thinking",
+            event_type=AgentEventType.STREAM_THINKING,
+            callback=self._on_thinking,
+            priority=99,
+        ))
+        hooks.register(HookHandler(
+            name="tui_stream_text",
+            event_type=AgentEventType.STREAM_TEXT,
+            callback=self._on_stream_text,
+            priority=99,
+        ))
+        hooks.register(HookHandler(
+            name="tui_tool_progress",
+            event_type=AgentEventType.TOOL_PROGRESS,
+            callback=self._on_tool_progress,
+            priority=99,
+        ))
+        hooks.register(HookHandler(
+            name="tui_agent_status",
+            event_type=AgentEventType.AGENT_STATUS,
+            callback=self._on_agent_status,
+            priority=99,
+        ))
+        hooks.register(HookHandler(
+            name="tui_turn_start",
+            event_type=AgentEventType.TURN_START,
+            callback=self._on_turn_start,
+            priority=99,
+        ))
+        hooks.register(HookHandler(
+            name="tui_turn_end",
+            event_type=AgentEventType.TURN_END,
+            callback=self._on_turn_end,
+            priority=99,
+        ))
+        hooks.register(HookHandler(
+            name="tui_compaction",
+            event_type=AgentEventType.CONTEXT_COMPACTION,
+            callback=self._on_compaction,
+            priority=99,
+        ))
+        hooks.register(HookHandler(
+            name="tui_subagent",
+            event_type=AgentEventType.SUBAGENT_START,
+            callback=self._on_subagent,
+            priority=99,
+        ))
+
+    # ── Hook 回调（实时渲染）──────────────────────────────
+
+    def _on_turn_start(self, event: AgentEvent):
+        self._thinking_shown = False
+        self._current_tools = []
+
+    def _on_turn_end(self, event: AgentEvent):
+        self._flush_stream()
+        self._thinking_shown = False
+
+    def _on_thinking(self, event: AgentEvent):
+        if not self._thinking_shown:
+            self._flush_stream()
+            self._println(f"  {DIM}{ITALIC}... 思考中 ...{RESET}")
+            self._thinking_shown = True
+
+    def _on_stream_text(self, event: AgentEvent):
+        text = event.data.get("text", "")
+        if not text:
+            return
+
+        # 清除思考指示
+        if self._thinking_shown:
+            self._thinking_shown = False
+
+        self._stream_buffer += text
+
+        # 遇到换行或积累够一定量就刷新
+        if "\n" in self._stream_buffer or len(self._stream_buffer) > 80:
+            self._flush_stream()
+        else:
+            # 逐字追加到当前行（不换行）
+            _safe_write(self._stream_buffer)
+            sys.stdout.flush()
+            self._stream_buffer = ""
+
+    def _on_tool_progress(self, event: AgentEvent):
+        tool_name = event.data.get("tool_name", "?")
+        status = event.data.get("status", "")
+
+        self._flush_stream()
+        self._thinking_shown = False
+
+        if status == "started":
+            badge = _tool_badge(tool_name)
+            # 提取工具参数中的文件路径（如有）
+            args_raw = ""
+            tc_list = self._current_tools
+            self._current_tools.append(tool_name)
+            self._println(f"  {badge} {CYAN}{tool_name}{RESET}{DIM}{args_raw}{RESET}")
+
+        elif status == "executing":
+            pass  # 已在 started 时显示
+
+        elif status == "done":
+            success = event.data.get("success", True)
+            preview = event.data.get("output_preview", "")
+            mark = f"{BRIGHT_GREEN}OK{RESET}" if success else f"{BRIGHT_RED}ERR{RESET}"
+            # 折叠输出：最多 2 行预览
+            if preview:
+                lines = preview.strip().split("\n")[:2]
+                preview_text = lines[0][:80]
+                if len(lines) > 1 or len(preview) > 80:
+                    preview_text += f" {DIM}(...){RESET}"
+                self._println(f"    {DIM}{TOOL_RESULT_PREFIX}{mark}{RESET} {DIM}{preview_text}{RESET}")
+            else:
+                self._println(f"    {DIM}{TOOL_RESULT_PREFIX}{mark}{RESET}")
+
+    def _on_agent_status(self, event: AgentEvent):
+        name = event.data.get("agent_name", "?")
+        status = event.data.get("status", "")
+        self._agent_statuses[name] = status
+        self._render_agent_panel()
+
+    def _on_subagent(self, event: AgentEvent):
+        name = event.data.get("agent_type", "?")
+        action = event.data.get("action", "started")
+        if action == "started":
+            self._agent_statuses[name] = "running"
+        else:
+            self._agent_statuses[name] = "done"
+        self._flush_stream()
+        self._render_agent_panel()
+
+    def _on_compaction(self, event: AgentEvent):
+        layer = event.data.get("layer", "?")
+        freed = event.data.get("freed", 0)
+        self._flush_stream()
+        self._println(f"  {YELLOW}[compact] {layer} freed {freed} tokens{RESET}")
+
+    # ── 实时渲染辅助 ──────────────────────────────────────
+
+    def _flush_stream(self):
+        if self._stream_buffer:
+            _safe_write(self._stream_buffer + "\n")
+            sys.stdout.flush()
+            self._stream_buffer = ""
+
+    def _render_agent_panel(self):
+        if not self._agent_statuses:
+            return
+        status_icons = {"running": f"{BRIGHT_YELLOW}~{RESET}", "done": f"{BRIGHT_GREEN}*{RESET}",
+                        "error": f"{BRIGHT_RED}!{RESET}", "waiting": f"{GRAY}-{RESET}"}
+        parts = []
+        for name, status in self._agent_statuses.items():
+            icon = status_icons.get(status, f"{GRAY}?{RESET}")
+            parts.append(f"{icon}{CYAN}{name}{RESET}")
+        self._println(f"  {DIM}[Agents: {' '.join(parts)}]{RESET}")
+
     # ── 公共入口 ────────────────────────────────────────
 
     async def run(self):
         """启动 TUI 会话（scrollback 模式，无 alt screen）。"""
         self._render_welcome()
         await self._input_loop()
+        # 注销 Hook
+        hooks = self._loop.hooks
+        for name in ["tui_stream_thinking", "tui_stream_text", "tui_tool_progress",
+                      "tui_agent_status", "tui_turn_start", "tui_turn_end",
+                      "tui_compaction", "tui_subagent"]:
+            hooks.unregister(name)
         self._println(f"\n{DIM}再见。{RESET}")
 
     # ── 输入循环 ────────────────────────────────────────
@@ -98,10 +321,8 @@ class TuiSession:
     # ── 对话处理 ────────────────────────────────────────
 
     async def _process_turn(self, user_input: str):
-        """处理一个对话轮次。"""
         self._turns += 1
 
-        # 打印用户消息
         self._println()
         self._println(format_user_message(user_input))
         self._println(_divider("-"))
@@ -112,124 +333,79 @@ class TuiSession:
             self._total_itokens += result.total_input_tokens
             self._total_otokens += result.total_output_tokens
 
-            self._render_messages_from_result(result)
-
-            if result.final_output:
-                self._println(result.final_output)
+            # 不再重新渲染全部消息（Hook 已经实时渲染了）
+            # 只渲染最终文本输出（如果有，且 Hook 未渲染）
+            if result.final_output and not self._is_streaming:
+                # 如果 Hook 已渲染过流式文本，final_output 已经显示了
+                pass
 
         except Exception as e:
             self._println(f"{RED}Error: {e}{RESET}")
             logger.exception("TUI turn error")
 
-    # ── 消息渲染 ────────────────────────────────────────
-
-    def _render_messages_from_result(self, result: "AgentResult"):
-        """从 AgentResult 渲染本轮新增消息（跳过初始 user 消息）。"""
-        messages = result.messages
-        skip_user = True
-        pending_tool_calls: dict[str, str] = {}
-
-        for msg in messages:
-            if skip_user and msg.role == "user":
-                skip_user = False
-                continue
-
-            if msg.role == "assistant":
-                if msg.content:
-                    self._println(msg.content)
-                if msg.tool_calls:
-                    for tc in msg.tool_calls:
-                        tool_name = tc.get("function", {}).get("name", "?")
-                        tool_id = tc.get("id", "")
-                        pending_tool_calls[tool_id] = tool_name
-                        self._println(format_tool_call(tool_name, "running"))
-
-            elif msg.role == "tool":
-                tool_id = msg.tool_call_id or ""
-                tool_name = msg.tool_name or pending_tool_calls.pop(tool_id, "?")
-                output = msg.content or ""
-                self._println(format_tool_call(tool_name, "done"))
-                self._println(format_tool_result(output, False))
-
-        for tool_id, tool_name in pending_tool_calls.items():
-            self._println(format_tool_call(tool_name, "done"))
+        self._println()
+        self._println(_divider("-"))
+        self._print_status_line()
 
     # ── 输出辅助 ────────────────────────────────────────
 
     def _println(self, text: str = ""):
-        """安全打印一行。"""
         _safe_write(text + "\n")
         sys.stdout.flush()
 
     def _print_status_line(self):
-        """打印状态行。"""
-        context_pct = 0.0
-        if hasattr(self._loop, "config"):
-            max_ctx = getattr(self._loop.config, "max_context_tokens", 128000)
-            if max_ctx > 0:
-                context_pct = (self._total_itokens / max_ctx) * 100
-        self._println(_divider("-"))
+        context_pct = self._compute_context_pct()
         self._println(format_status_line(
             self._loop.model_name, self._turns,
             self._total_itokens, self._total_otokens,
             context_pct,
         ))
 
+    def _compute_context_pct(self) -> float:
+        """计算当前上下文占用百分比（而非累计 token）。"""
+        try:
+            from agent.context_window import count_total_tokens
+            tools = self._loop.tools.get_definitions()
+            tokens = count_total_tokens(
+                self._context.messages,
+                self._context.system_prompt,
+                tools,
+            )
+            max_ctx = getattr(self._loop.config, "max_context_tokens", 0)
+            if max_ctx <= 0:
+                max_ctx = getattr(self._loop.provider, "_context_window_cache", 0) or 128000
+            return (tokens / max_ctx) * 100 if max_ctx > 0 else 0.0
+        except Exception:
+            return 0.0
+
     def _render_welcome(self):
-        """渲染欢迎界面。"""
         logo = f"""
 {BOLD}{CYAN}+{'=' * 50}+
 |  {BOLD}my-agent {DIM}v0.1.0{CYAN}                                 |
-|  {DIM}Empire Code — 可控多智能体自迭代 Agent 框架{CYAN}     |
+|  {DIM}Empire Code -- 可控多智能体自迭代 Agent 框架{CYAN}     |
 +{'=' * 50}+{RESET}
 """
         self._println(logo)
         self._println(f"  {DIM}底层模型:{RESET} {self._loop.model_name}")
         self._println(f"  {DIM}可用工具:{RESET} {self._loop.tool_count} 个")
-        self._println(f"  {DIM}/help 命令 | /flowchart 流程图 | /fcd 浏览器详情 | /exit 退出{RESET}")
-        self._println()
-
-    # ── 流程图 ──────────────────────────────────────────
-
-    async def _show_flowchart(self):
-        """静态显示流程图，保留在 scrollback 中，按任意键继续对话。"""
-        from app.tui.flowchart import FlowchartSession
-        fs = FlowchartSession()
-        await fs.run_static()
-        self._println()
-        self._println(_divider("-"))
-
-    def _open_flowchart_detail(self):
-        """直接打开浏览器流程图详情页（不显示终端流程图）。"""
-        from app.tui.flowchart import FlowchartSession
-        fs = FlowchartSession()
-        fs._open_html_detail()
-        self._println(f"  {GRAY}{DIM}浏览器已打开详情页{RESET}")
+        self._println(f"  {DIM}/help | /flowchart | /exit{RESET}")
         self._println()
 
     # ── 斜杠命令 ────────────────────────────────────────
 
     async def _handle_command(self, text: str) -> bool:
-        """处理斜杠命令。返回 True 表示已处理。
-
-        优先查 COMMANDS 注册表，其次处理内置退出命令。
-        插件可通过 register_command 装饰器扩展命令表。
-        """
         parts = text.strip().split()
         cmd = parts[0].lower() if parts else ""
 
-        # 内置退出命令（不可覆盖）
         if cmd in ("/exit", "/quit", "/q"):
             self._running = False
             return True
 
-        # 从注册表查找
         if cmd in COMMANDS:
             _, handler = COMMANDS[cmd]
             await handler(self)
             return True
 
-        # 别名映射
         ALIASES = {"/fc": "/flowchart", "/flow": "/flowchart",
                     "/fcd": "/fco", "/h": "/help"}
         resolved = ALIASES.get(cmd)
@@ -243,6 +419,11 @@ class TuiSession:
         return True
 
 
+# ── 工具结果前缀 ──────────────────────────────────────────
+
+TOOL_RESULT_PREFIX = "|_ "
+
+
 # ── 内置斜杠命令（装饰器注册，插件可扩展）─────────────────
 
 @register_command("/help", "显示帮助")
@@ -250,7 +431,7 @@ async def _cmd_help(session: TuiSession):
     session._println()
     session._println(f"{BOLD}可用命令:{RESET}")
     for name, (desc, _) in sorted(COMMANDS.items()):
-        session._println(f"  {CYAN}{name:<16}{RESET} — {desc}")
+        session._println(f"  {CYAN}{name:<16}{RESET} -- {desc}")
     session._println()
     session._println(f"{DIM}提示：Enter 提交，Esc+Enter 换行，Ctrl+C/D 退出{RESET}")
     session._println()
@@ -258,12 +439,20 @@ async def _cmd_help(session: TuiSession):
 
 @register_command("/flowchart", "查看控制流程图")
 async def _cmd_flowchart(session: TuiSession):
-    await session._show_flowchart()
+    from app.tui.flowchart import FlowchartSession
+    fs = FlowchartSession()
+    await fs.run_static()
+    session._println()
+    session._println(_divider("-"))
 
 
 @register_command("/fco", "浏览器打开流程图详解")
 async def _cmd_fco(session: TuiSession):
-    session._open_flowchart_detail()
+    from app.tui.flowchart import FlowchartSession
+    fs = FlowchartSession()
+    fs._open_html_detail()
+    session._println(f"  {GRAY}{DIM}浏览器已打开详情页{RESET}")
+    session._println()
 
 
 @register_command("/clear", "清屏")
@@ -284,14 +473,32 @@ async def _cmd_tools(session: TuiSession):
         desc = getattr(tool.definition, "description", "") if hasattr(tool, "definition") else ""
         if len(desc) > 60:
             desc = desc[:57] + "..."
-        session._println(f"  {CYAN}{name:<25}{RESET} {DIM}{desc}{RESET}")
+        badge = _tool_badge(name)
+        session._println(f"  {badge} {CYAN}{name:<22}{RESET} {DIM}{desc}{RESET}")
     session._println()
 
 
 @register_command("/tokens", "显示 Token 统计")
 async def _cmd_tokens(session: TuiSession):
+    ctx_pct = session._compute_context_pct()
     session._println(f"  {DIM}累计 Token 使用:{RESET}")
     session._println(f"  {BRIGHT_GREEN}输入:{RESET} {session._total_itokens}")
     session._println(f"  {BRIGHT_BLUE}输出:{RESET} {session._total_otokens}")
     session._println(f"  {YELLOW}合计:{RESET} {session._total_itokens + session._total_otokens}")
+    session._println(f"  {CYAN}上下文占用:{RESET} {ctx_pct:.1f}%")
+    session._println()
+
+
+@register_command("/status", "显示 Agent 状态")
+async def _cmd_status(session: TuiSession):
+    session._println(f"  {BOLD}Agent 状态:{RESET}")
+    if session._agent_statuses:
+        for name, status in session._agent_statuses.items():
+            icons = {"running": f"{BRIGHT_YELLOW}~ running{RESET}",
+                     "done": f"{BRIGHT_GREEN}* done{RESET}",
+                     "error": f"{BRIGHT_RED}! error{RESET}",
+                     "waiting": f"{GRAY}- waiting{RESET}"}
+            session._println(f"    {CYAN}{name:<15}{RESET} {icons.get(status, status)}")
+    else:
+        session._println(f"    {DIM}无活跃子 Agent{RESET}")
     session._println()
