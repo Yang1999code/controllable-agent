@@ -411,7 +411,9 @@ class AgentRuntime(IAgentRuntime):
                 )
                 result = await asyncio.wait_for(
                     child_loop.run(task, child_context),
-                    timeout=self._default_timeout,
+                    timeout=context.get(
+                        "_timeout_override", self._default_timeout,
+                    ) if context else self._default_timeout,
                 )
                 status = "completed"
                 error = None
@@ -536,15 +538,17 @@ class AgentRuntime(IAgentRuntime):
         return ROLE_MAX_TOOL_CALLS.get(agent_type, 15)
 
     @staticmethod
-    def _estimate_task_complexity(plan_content: str) -> dict[str, int]:
-        """从 plan.md 内容估算任务复杂度，返回各角色的动态 max_tool_calls。
+    def _estimate_task_complexity(plan_content: str) -> dict:
+        """从 plan.md 内容估算任务复杂度，返回动态配置。
 
-        规则：
-        - 统计文件数（write/create/new file 等关键词）
-        - 统计步骤数（### / Step / 步骤 等标记）
-        - 文件数 <= 3: 简单 → coder=30, reviewer=20
-        - 文件数 4-8: 中等 → coder=50, reviewer=30
-        - 文件数 >= 9 或步骤 >= 10: 复杂 → coder=80, reviewer=40
+        返回:
+            {
+                "coder": max_tool_calls,
+                "reviewer": max_tool_calls,
+                "planner": max_tool_calls,
+                "timeout_coder": 秒,
+                "timeout_reviewer": 秒,
+            }
         """
         file_count = 0
         for pattern in [r'\b\w+\.py\b', r'\b\w+\.js\b', r'\b\w+\.ts\b',
@@ -555,11 +559,14 @@ class AgentRuntime(IAgentRuntime):
         step_count = len(re.findall(r'(?:^###?\s|Step\s*\d+|步骤\s*\d+|\d+\.\s)', plan_content))
 
         if file_count >= 9 or step_count >= 10:
-            return {"coder": 80, "reviewer": 40, "planner": 25}
+            return {"coder": 80, "reviewer": 40, "planner": 25,
+                    "timeout_coder": 900, "timeout_reviewer": 600}
         elif file_count >= 4 or step_count >= 5:
-            return {"coder": 50, "reviewer": 30, "planner": 20}
+            return {"coder": 50, "reviewer": 30, "planner": 20,
+                    "timeout_coder": 600, "timeout_reviewer": 420}
         else:
-            return {"coder": 30, "reviewer": 20, "planner": 15}
+            return {"coder": 30, "reviewer": 20, "planner": 15,
+                    "timeout_coder": 300, "timeout_reviewer": 300}
 
     # ── Phase 3: 分阶段编排 ──
 
@@ -605,25 +612,38 @@ class AgentRuntime(IAgentRuntime):
 
         # Phase B + C 循环（带打回机制）
         for attempt in range(max_retries + 1):
-            # Phase B: 并行执行（Coder+Reviewer 配对 + Memorizer + Coordinator）
-            phase_b_tasks = [
+            # Phase B-1: Coordinator + Memorizer 并行（轻量辅助）
+            phase_b_lightweight = [
                 {"agent_type": "coordinator", "task": "监控多 Agent 协作流程",
                  "context": {"agent_id": "coordinator_001"}, "current_depth": 1},
                 {"agent_type": "memorizer", "task": "检索历史经验支持当前任务",
                  "context": {"agent_id": "memorizer_001"}, "current_depth": 1},
-                {"agent_type": "coder", "task": "按 plan.md 执行代码实现",
-                 "context": {"agent_id": "coder_001",
-                             "_max_tool_calls_override": complexity_overrides.get("coder")},
-                 "current_depth": 1},
-                {"agent_type": "reviewer",
-                 "task": ("读取 Coder 已写的代码，检查类型注解和方法名遮蔽问题，"
-                          "运行已有测试验证通过，发现问题写入 shared/issues.md"),
-                 "context": {"agent_id": "reviewer_001",
-                             "_max_tool_calls_override": complexity_overrides.get("reviewer")},
-                 "current_depth": 1},
             ]
-            phase_b_results = await self.spawn_parallel(phase_b_tasks)
-            all_results.extend(phase_b_results)
+            lightweight_results = await self.spawn_parallel(phase_b_lightweight)
+            all_results.extend(lightweight_results)
+
+            # Phase B-2: Coder 串行执行（先写完代码）
+            coder_result = await self.spawn(
+                agent_type="coder",
+                task="按 plan.md 执行代码实现",
+                context={"agent_id": "coder_001",
+                         "_max_tool_calls_override": complexity_overrides.get("coder"),
+                         "_timeout_override": complexity_overrides.get("timeout_coder")},
+                current_depth=1,
+            )
+            all_results.append(coder_result)
+
+            # Phase B-3: Reviewer 串行执行（等 coder 写完再审查）
+            reviewer_result = await self.spawn(
+                agent_type="reviewer",
+                task=("读取 Coder 已写的代码，检查类型注解和方法名遮蔽问题，"
+                      "运行已有测试验证通过，发现问题写入 shared/issues.md"),
+                context={"agent_id": "reviewer_001",
+                         "_max_tool_calls_override": complexity_overrides.get("reviewer"),
+                         "_timeout_override": complexity_overrides.get("timeout_reviewer")},
+                current_depth=1,
+            )
+            all_results.append(reviewer_result)
 
             # Phase C: 总体集成测试（串行）
             phase_c_result = await self.spawn(
@@ -633,7 +653,8 @@ class AgentRuntime(IAgentRuntime):
                       "3) 如果测试失败，分析失败原因并记录到 shared/issues.md "
                       "4) 检查所有模块导入和接口一致性"),
                 context={"agent_id": "reviewer_final",
-                         "_max_tool_calls_override": complexity_overrides.get("reviewer")},
+                         "_max_tool_calls_override": complexity_overrides.get("reviewer"),
+                         "_timeout_override": complexity_overrides.get("timeout_reviewer")},
                 current_depth=1,
             )
             all_results.append(phase_c_result)
@@ -661,7 +682,8 @@ class AgentRuntime(IAgentRuntime):
                 "7) 找到的所有问题记录到 shared/issues.md，标明严重级别"
             ),
             context={"agent_id": "reviewer_adversarial",
-                     "_max_tool_calls_override": complexity_overrides.get("reviewer")},
+                     "_max_tool_calls_override": complexity_overrides.get("reviewer"),
+                     "_timeout_override": complexity_overrides.get("timeout_reviewer")},
             current_depth=1,
         )
         all_results.append(adversarial_result)
@@ -688,7 +710,8 @@ class AgentRuntime(IAgentRuntime):
                     "修复完成后清空 shared/issues.md 中的已修复条目。"
                 ),
                 context={"agent_id": f"coder_fix_{fix_rounds:03d}",
-                             "_max_tool_calls_override": complexity_overrides.get("coder")},
+                             "_max_tool_calls_override": complexity_overrides.get("coder"),
+                             "_timeout_override": complexity_overrides.get("timeout_coder")},
                 current_depth=1,
             )
             all_results.append(fix_result)
@@ -704,7 +727,8 @@ class AgentRuntime(IAgentRuntime):
                     "4) 如果仍有问题，记录到 shared/issues.md"
                 ),
                 context={"agent_id": f"reviewer_verify_{fix_rounds:03d}",
-                         "_max_tool_calls_override": complexity_overrides.get("reviewer")},
+                         "_max_tool_calls_override": complexity_overrides.get("reviewer"),
+                         "_timeout_override": complexity_overrides.get("timeout_reviewer")},
                 current_depth=1,
             )
             all_results.append(verify_result)

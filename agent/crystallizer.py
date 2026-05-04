@@ -221,3 +221,80 @@ class SkillCrystallizer:
         if count:
             logger.info("Loaded %d skills from %s", count, self.skills_dir)
         return count
+
+    # ── 技能质量评分与淘汰 ──
+
+    # 质量评分阈值：低于此分数的技能会被淘汰
+    QUALITY_THRESHOLD = 30.0
+
+    def score_skill(self, skill_name: str, success: bool, user_feedback: float | None = None) -> float:
+        """根据使用结果更新技能质量评分。
+
+        Args:
+            skill_name: 技能名
+            success: 这次使用是否成功
+            user_feedback: 用户评分 0-100（可选）
+
+        Returns:
+            更新后的分数
+        """
+        skill = self.registry.get(skill_name)
+        if skill is None:
+            return 0.0
+
+        old_score = skill.quality_score
+        use_count = skill.use_count + 1
+
+        # 基础分：成功 +10，失败 -20
+        delta = 10.0 if success else -20.0
+
+        # 用户反馈加权
+        if user_feedback is not None:
+            delta += (user_feedback - 50) * 0.3
+
+        # 使用越多，单次影响越小（避免剧烈波动）
+        weight = 1.0 / (1.0 + use_count * 0.1)
+        new_score = max(0.0, min(100.0, old_score + delta * weight))
+
+        # 创建更新后的 skill（不可变模式）
+        updated = Skill(
+            name=skill.name,
+            description=skill.description,
+            trigger_condition=skill.trigger_condition,
+            steps=skill.steps,
+            config=skill.config,
+            quality_score=new_score,
+            created_at=skill.created_at,
+            last_used_at=time.time(),
+            use_count=use_count,
+        )
+        self.registry.register(updated)
+        self._persist(updated)
+
+        logger.info("Skill '%s' score: %.1f → %.1f (use=%d, success=%s)",
+                     skill_name, old_score, new_score, use_count, success)
+        return new_score
+
+    def prune_low_quality(self) -> list[str]:
+        """淘汰质量分数低于阈值的技能。
+
+        Returns:
+            被淘汰的技能名列表
+        """
+        pruned = []
+        for skill in self.registry.list_all():
+            if skill.quality_score < self.QUALITY_THRESHOLD and skill.use_count >= 3:
+                pruned.append(skill.name)
+                self.registry.unregister(skill.name)
+                # 删除文件
+                try:
+                    safe_name = re.sub(r'[^\w一-鿿-]', '_', skill.name)
+                    yaml_path = self.skills_dir / f"{safe_name}.yaml"
+                    if yaml_path.exists():
+                        yaml_path.unlink()
+                except Exception:
+                    pass
+                logger.info("Pruned low-quality skill '%s' (score=%.1f)",
+                             skill.name, skill.quality_score)
+
+        return pruned

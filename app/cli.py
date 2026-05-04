@@ -14,6 +14,8 @@ import asyncio
 import logging
 import sys
 
+import yaml
+
 from my_agent import (
     Context, Message,
     ToolRegistry, HookChain,
@@ -168,6 +170,34 @@ async def main():
                 _safe_print(f"[MCP] {srv.get('name', '?')}: skipped (mcp package not installed)")
             except Exception as e:
                 _safe_print(f"[MCP] {srv.get('name', '?')}: error — {e}")
+
+    # MCP 自动发现：扫描 .agent-base/mcp/ 目录下的 YAML 配置
+    from pathlib import Path as _Path
+    mcp_auto_dir = _Path(".agent-base/mcp")
+    if mcp_auto_dir.exists():
+        for mcp_yaml in mcp_auto_dir.glob("*.yaml"):
+            try:
+                srv_cfg = yaml.safe_load(mcp_yaml.read_text(encoding="utf-8"))
+                if not isinstance(srv_cfg, dict) or srv_cfg.get("disabled"):
+                    continue
+                mcp_config = MCPServerConfig(
+                    name=srv_cfg.get("name", mcp_yaml.stem),
+                    transport=srv_cfg.get("transport", "stdio"),
+                    command=srv_cfg.get("command", ""),
+                    args=srv_cfg.get("args", []),
+                    url=srv_cfg.get("url", ""),
+                    env=srv_cfg.get("env", {}),
+                )
+                mcp_client = MCPClient(mcp_config)
+                await mcp_client.connect()
+                for adapter in mcp_client.create_adapters():
+                    tools.register(adapter)
+                mcp_clients.append(mcp_client)
+                _safe_print(f"[MCP] {mcp_config.name} (auto): {len(mcp_client.tool_names)} tools")
+            except ImportError:
+                pass
+            except Exception as e:
+                _safe_print(f"[MCP] {mcp_yaml.stem} (auto): error — {e}")
 
     # ── Phase 2/3 模块装配 ──────────────────────────────
     # SkillRegistry — 技能注册表

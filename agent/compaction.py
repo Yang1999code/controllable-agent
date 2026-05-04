@@ -1,8 +1,9 @@
-"""agent/compaction.py — 三层上下文压缩。
+"""agent/compaction.py — 四层上下文压缩。
 
 参考 OpenCode compaction.ts（tail_start_id 指针机制）。
 
-三层递进：
+四层递进：
+0. Truncate Results（无 API）—— 截断超大工具输出
 1. Prune（无 API）—— 清除 3 轮前的工具输出
 2. Summary（1 次 API）—— LLM 摘要旧消息，保留尾部
 3. Emergency Truncation（无 API）—— 从最早消息开始删除
@@ -18,6 +19,7 @@ from agent.context_window import count_total_tokens
 logger = logging.getLogger(__name__)
 
 DEFAULT_KEEP_TURNS = 3  # prune 保留最近 N 轮的工具输出
+LARGE_TOOL_RESULT_THRESHOLD = 5000  # 超过此字符数的工具结果会被截断
 
 
 @dataclass
@@ -25,7 +27,7 @@ class CompactionResult:
     messages: list[Message] = field(default_factory=list)
     tail_start_id: str = ""
     tokens_freed: int = 0
-    layer_used: str = "none"  # "prune" | "summary" | "truncate" | "none"
+    layer_used: str = "none"  # "prune" | "summary" | "truncate" | "truncate_results" | "none"
     summary_text: str = ""
 
 
@@ -47,8 +49,18 @@ def compact(
     if tokens_before <= limit:
         return CompactionResult(messages=list(messages), layer_used="none")
 
+    # ── Layer 0: 截断大工具输出（不丢消息，只缩短内容）──
+    truncated = _truncate_large_tool_results(messages)
+    tokens_after_trunc = count_total_tokens(truncated, system_prompt, tool_defs)
+    if tokens_after_trunc <= limit:
+        return CompactionResult(
+            messages=truncated,
+            tokens_freed=tokens_before - tokens_after_trunc,
+            layer_used="truncate_results",
+        )
+
     # ── Layer 1: Prune ──
-    pruned = _prune_observations(messages)
+    pruned = _prune_observations(truncated)
     tokens_after_prune = count_total_tokens(pruned, system_prompt, tool_defs)
     if tokens_after_prune <= limit:
         tail_id = _find_first_kept(messages, pruned)
@@ -80,14 +92,40 @@ def compact(
 
     # ── Layer 3: Emergency Truncation ──
     emergency_limit = int(usable_context * emergency_threshold)
-    truncated = _truncate_head(pruned, system_prompt, tool_defs, emergency_limit)
-    tail_id = truncated[0].id if truncated else ""
-    tokens_after = count_total_tokens(truncated, system_prompt, tool_defs)
+    truncated_final = _truncate_head(pruned, system_prompt, tool_defs, emergency_limit)
+    tail_id = truncated_final[0].id if truncated_final else ""
+    tokens_after = count_total_tokens(truncated_final, system_prompt, tool_defs)
     return CompactionResult(
-        messages=truncated, tail_start_id=tail_id,
+        messages=truncated_final, tail_start_id=tail_id,
         tokens_freed=tokens_before - tokens_after,
         layer_used="truncate",
     )
+
+
+def _truncate_large_tool_results(messages: list[Message]) -> list[Message]:
+    """截断超大工具输出，保留首尾关键信息。
+
+    对于超过 LARGE_TOOL_RESULT_THRESHOLD 字符的工具结果：
+    - 保留前 400 字符（头部信息）
+    - 保留后 100 字符（尾部状态）
+    - 中间替换为 "[...truncated...]"
+    """
+    result = []
+    for msg in messages:
+        if msg.role == "tool" and msg.content and len(msg.content) > LARGE_TOOL_RESULT_THRESHOLD:
+            head = msg.content[:400]
+            tail = msg.content[-100:]
+            truncated_content = f"{head}\n\n[...truncated {len(msg.content) - 500} chars...]\n\n{tail}"
+            result.append(Message(
+                role=msg.role,
+                content=truncated_content,
+                id=msg.id,
+                tool_call_id=msg.tool_call_id,
+                tool_name=msg.tool_name,
+            ))
+        else:
+            result.append(msg)
+    return result
 
 
 def _prune_observations(messages: list[Message]) -> list[Message]:
