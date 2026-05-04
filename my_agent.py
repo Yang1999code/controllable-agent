@@ -32,6 +32,7 @@ from agent.skill import (
     ISkill, ISkillConfig,
 )
 from agent.crystallizer import SkillCrystallizer
+from agent.runtime import AgentRuntime, AgentTypeConfig, SubAgentResult
 from agent.web import WebAutomation, IWebAutomation
 from agent.mcp import MCPClient, MCPServerConfig, MCPToolAdapter
 from agent.memory.store import MemoryStore
@@ -87,6 +88,7 @@ __all__ = [
     "MemoryExtractor", "ExtractionResult",
     "Deduplicator", "DeduplicationResult", "DuplicationVerdict",
     # phase 3 multi-agent
+    "AgentRuntime", "AgentTypeConfig", "SubAgentResult",
     "AgentStoreFactory", "AgentStores",
     "SharedSpace",
     "load_role_config", "load_all_roles", "register_roles",

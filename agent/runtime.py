@@ -274,7 +274,7 @@ class AgentRuntime(IAgentRuntime):
                 "timestamp": time.time(),
             })
         except asyncio.QueueFull:
-            pass
+            logger.warning("Inbox full for agent %s, message from %s dropped", to_agent, from_agent)
 
     def check_inbox(self, agent_id: str) -> str | None:
         """检查指定 Agent 的收件箱。非阻塞。"""
@@ -403,17 +403,16 @@ class AgentRuntime(IAgentRuntime):
                     hooks=self._hooks,
                     config=AgentConfig(
                         max_turns=self._get_max_turns(agent_type),
-                        max_tool_calls_per_turn=context.get(
-                            "_max_tool_calls_override",
-                            self._get_max_tool_calls(agent_type),
+                        max_tool_calls_per_turn=(
+                            context.get("_max_tool_calls_override")
+                            or self._get_max_tool_calls(agent_type)
                         ) if context else self._get_max_tool_calls(agent_type),
                     ),
                 )
                 result = await asyncio.wait_for(
                     child_loop.run(task, child_context),
-                    timeout=context.get(
-                        "_timeout_override", self._default_timeout,
-                    ) if context else self._default_timeout,
+                    timeout=(context.get("_timeout_override") or self._default_timeout)
+                    if context else self._default_timeout,
                 )
                 status = "completed"
                 error = None
@@ -551,9 +550,7 @@ class AgentRuntime(IAgentRuntime):
             }
         """
         file_count = 0
-        for pattern in [r'\b\w+\.py\b', r'\b\w+\.js\b', r'\b\w+\.ts\b',
-                        r'\b\w+\.html\b', r'\b\w+\.css\b', r'\b\w+\.json\b',
-                        r'\b\w+\.yaml\b', r'\b\w+\.yml\b', r'\b\w+\.md\b']:
+        for pattern in [r'[\w/.]+\.(?:py|js|ts|html|css|json|ya?ml|md)\b']:
             file_count += len(re.findall(pattern, plan_content))
 
         step_count = len(re.findall(r'(?:^###?\s|Step\s*\d+|步骤\s*\d+|\d+\.\s)', plan_content))
@@ -659,8 +656,9 @@ class AgentRuntime(IAgentRuntime):
             )
             all_results.append(phase_c_result)
 
-            # 检查是否需要打回
-            if phase_c_result.status == "completed":
+            # 检查是否需要打回（同时检查执行状态和 issues.md 中是否有严重问题）
+            has_critical = await self._check_critical_issues()
+            if phase_c_result.status == "completed" and not has_critical:
                 break
             if attempt < max_retries:
                 logger.info("Integration test failed, retrying (attempt %d/%d)",
@@ -792,19 +790,18 @@ class AgentRuntime(IAgentRuntime):
             return False
         try:
             store = self._shared_space._store
-            issues_path = store.root_path / "shared" / "issues.md"
+            issues_path = store.base_path / "issues.md"
             if not issues_path.exists():
                 return False
             content = issues_path.read_text(encoding="utf-8")
-            # 查找 CRITICAL 或 HIGH 标记
+            issue_pattern = re.compile(r'\b(CRITICAL|HIGH)\b', re.IGNORECASE)
+            fixed_pattern = re.compile(r'\b(FIXED|RESOLVED)\b', re.IGNORECASE)
             for line in content.split("\n"):
-                line_upper = line.upper()
-                if "CRITICAL" in line_upper or "HIGH" in line_upper:
-                    # 排除已标记为修复的行
-                    if "FIXED" not in line_upper and "RESOLVED" not in line_upper:
-                        return True
+                if issue_pattern.search(line) and not fixed_pattern.search(line):
+                    return True
             return False
-        except Exception:
+        except Exception as e:
+            logger.warning("Failed to check critical issues: %s", e)
             return False
 
     def _read_plan_complexity(self) -> dict[str, int]:
@@ -816,7 +813,7 @@ class AgentRuntime(IAgentRuntime):
             return {}
         try:
             store = self._shared_space._store
-            plan_path = store.root_path / "shared" / "plan.md"
+            plan_path = store.base_path / "plan.md"
             if not plan_path.exists():
                 return {}
             plan_content = plan_path.read_text(encoding="utf-8")
@@ -826,5 +823,5 @@ class AgentRuntime(IAgentRuntime):
             logger.info("Plan complexity analysis: %s", overrides)
             return overrides
         except Exception as e:
-            logger.debug("Failed to read plan for complexity: %s", e)
+            logger.warning("Failed to read plan for complexity: %s", e)
             return {}

@@ -211,18 +211,17 @@ class TestPersist:
         crystallizer._persist(skill)
         yaml_file = tmp_skills_dir / "counter.yaml"
         data = yaml.safe_load(yaml_file.read_text(encoding="utf-8"))
-        assert "use_count" not in data  # 新技能没有 use_count
+        assert "use_count" not in data  # 新技能 use_count=0，不写入
 
-        # 模拟已有技能有 use_count
-        data["use_count"] = 5
-        data["last_used_at"] = 1000.0
-        yaml_file.write_text(yaml.dump(data, allow_unicode=True), encoding="utf-8")
-
-        # 再次持久化
-        skill2 = Skill(name="counter", trigger_condition="x", steps=[{"tool": "bash"}])
+        # 模拟有使用记录的技能
+        skill2 = Skill(
+            name="counter", trigger_condition="x",
+            steps=[{"tool": "bash"}], use_count=5, last_used_at=1000.0,
+        )
         crystallizer._persist(skill2)
         data2 = yaml.safe_load(yaml_file.read_text(encoding="utf-8"))
         assert data2["use_count"] == 5
+        assert data2["last_used_at"] == 1000.0
 
 
 # ── 完整 crystallize 流程 ──

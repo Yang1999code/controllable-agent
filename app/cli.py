@@ -90,6 +90,7 @@ async def run_legacy_repl(loop: AgentLoop, context: Context):
 async def main():
     # Windows 终端 UTF-8 支持
     if sys.platform == "win32":
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
@@ -195,7 +196,7 @@ async def main():
                 mcp_clients.append(mcp_client)
                 _safe_print(f"[MCP] {mcp_config.name} (auto): {len(mcp_client.tool_names)} tools")
             except ImportError:
-                pass
+                _safe_print(f"[MCP] {mcp_yaml.stem} (auto): skipped (mcp package not installed)")
             except Exception as e:
                 _safe_print(f"[MCP] {mcp_yaml.stem} (auto): error — {e}")
 

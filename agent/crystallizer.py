@@ -71,6 +71,7 @@ class SkillCrystallizer:
     def _extract_skill_proposals(self, text: str) -> list[dict]:
         """从文本中提取技能提案（YAML 代码块）。"""
         proposals = []
+        seen_names = set()
 
         # 模式 1: ```skill ... ``` 或 ```yaml ... ``` 包含 name + steps
         pattern = r"```(?:skill|yaml)\s*\n(.*?)```"
@@ -79,7 +80,10 @@ class SkillCrystallizer:
             try:
                 data = yaml.safe_load(raw)
                 if isinstance(data, dict) and "name" in data:
-                    proposals.append(data)
+                    name = data["name"]
+                    if name not in seen_names:
+                        proposals.append(data)
+                        seen_names.add(name)
             except yaml.YAMLError:
                 continue
 
@@ -95,7 +99,10 @@ class SkillCrystallizer:
                 try:
                     data = yaml.safe_load(raw)
                     if isinstance(data, dict) and "name" in data:
-                        proposals.append(data)
+                        name = data["name"]
+                        if name not in seen_names:
+                            proposals.append(data)
+                            seen_names.add(name)
                 except yaml.YAMLError:
                     continue
 
@@ -156,7 +163,7 @@ class SkillCrystallizer:
         """将技能持久化为 YAML 文件。"""
         try:
             self.skills_dir.mkdir(parents=True, exist_ok=True)
-            safe_name = re.sub(r'[^\w一-鿿-]', '_', skill.name)
+            safe_name = re.sub(r'[^\w一-鿿]', '_', skill.name)
             file_path = self.skills_dir / f"{safe_name}.yaml"
 
             data = {
@@ -169,15 +176,10 @@ class SkillCrystallizer:
                 "created_at": skill.created_at,
             }
 
-            existing = None
-            if file_path.exists():
-                try:
-                    existing = yaml.safe_load(file_path.read_text(encoding="utf-8"))
-                except Exception:
-                    pass
-                if isinstance(existing, dict) and existing.get("use_count", 0) > 0:
-                    data["use_count"] = existing["use_count"]
-                    data["last_used_at"] = existing.get("last_used_at", skill.last_used_at)
+            # 总是写入 use_count 和 last_used_at（如果有值）
+            if skill.use_count > 0:
+                data["use_count"] = skill.use_count
+                data["last_used_at"] = skill.last_used_at
 
             file_path.write_text(
                 yaml.dump(data, allow_unicode=True, default_flow_style=False),
@@ -288,7 +290,7 @@ class SkillCrystallizer:
                 self.registry.unregister(skill.name)
                 # 删除文件
                 try:
-                    safe_name = re.sub(r'[^\w一-鿿-]', '_', skill.name)
+                    safe_name = re.sub(r'[^\w一-鿿]', '_', skill.name)
                     yaml_path = self.skills_dir / f"{safe_name}.yaml"
                     if yaml_path.exists():
                         yaml_path.unlink()

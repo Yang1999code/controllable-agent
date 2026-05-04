@@ -113,6 +113,39 @@ class TestSkillScoring:
         skill = registry.get("counter")
         assert skill.use_count == 2
 
+    def test_score_exact_calculation(self, tmp_path):
+        """验证 user_feedback 权重计算精确值。"""
+        registry = SkillRegistry()
+        registry.register(Skill(
+            name="calc_test", trigger_condition="x",
+            steps=[{"tool": "bash"}], quality_score=50.0,
+        ))
+        cryst = SkillCrystallizer(registry, skills_dir=tmp_path)
+        # success=True: +10, user_feedback=80: (80-50)*0.3 = +9
+        # delta = 10 + 9 = 19
+        # use_count becomes 1, weight = 1/(1+0.1) ≈ 0.9091
+        # new_score = 50 + 19 * 0.9091 ≈ 67.27
+        new_score = cryst.score_skill("calc_test", success=True, user_feedback=80)
+        assert abs(new_score - 67.27) < 0.1
+
+    def test_score_persists_to_disk(self, tmp_path):
+        """验证评分结果持久化到磁盘。"""
+        import yaml
+        registry = SkillRegistry()
+        registry.register(Skill(
+            name="disk_test", trigger_condition="x",
+            steps=[{"tool": "bash"}], quality_score=50.0,
+        ))
+        cryst = SkillCrystallizer(registry, skills_dir=tmp_path)
+        cryst._persist(registry.get("disk_test"))
+        new_score = cryst.score_skill("disk_test", success=True)
+        # 读取磁盘文件验证
+        yaml_file = tmp_path / "disk_test.yaml"
+        assert yaml_file.exists()
+        data = yaml.safe_load(yaml_file.read_text(encoding="utf-8"))
+        assert data["quality_score"] == new_score
+        assert data["use_count"] == 1
+
 
 class TestSkillPruning:
 
@@ -129,11 +162,18 @@ class TestSkillPruning:
             steps=[{"tool": "bash"}], quality_score=80.0, use_count=5,
         ))
         cryst = SkillCrystallizer(registry, skills_dir=tmp_path)
+        # 先持久化到磁盘，验证磁盘文件也被删除
+        cryst._persist(registry.get("bad"))
+        cryst._persist(registry.get("good"))
+        assert (tmp_path / "bad.yaml").exists()
         pruned = cryst.prune_low_quality()
         assert "bad" in pruned
         assert "good" not in pruned
         assert registry.get("bad") is None
         assert registry.get("good") is not None
+        # 验证磁盘文件也被删除
+        assert not (tmp_path / "bad.yaml").exists()
+        assert (tmp_path / "good.yaml").exists()
 
     def test_dont_prune_few_uses(self, tmp_path):
         """使用不足 3 次的低分技能不应该被淘汰。"""
@@ -146,6 +186,18 @@ class TestSkillPruning:
         pruned = cryst.prune_low_quality()
         assert "new_but_bad" not in pruned
         assert registry.get("new_but_bad") is not None
+
+    def test_exact_threshold_not_pruned(self, tmp_path):
+        """质量分数恰好等于阈值(30.0)的技能不应该被淘汰。"""
+        registry = SkillRegistry()
+        registry.register(Skill(
+            name="borderline", trigger_condition="x",
+            steps=[{"tool": "bash"}], quality_score=30.0, use_count=5,
+        ))
+        cryst = SkillCrystallizer(registry, skills_dir=tmp_path)
+        pruned = cryst.prune_low_quality()
+        assert "borderline" not in pruned
+        assert registry.get("borderline") is not None
 
 
 # ── 优化 3: 动态超时 ──
