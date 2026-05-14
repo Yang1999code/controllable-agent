@@ -88,6 +88,16 @@ async def run_legacy_repl(loop: AgentLoop, context: Context):
 
 
 async def main():
+    # 加载 .env 文件（如果存在）
+    try:
+        from dotenv import load_dotenv
+        from pathlib import Path as _Path
+        env_path = _Path(".env")
+        if env_path.exists():
+            load_dotenv(env_path)
+    except ImportError:
+        pass
+
     # Windows 终端 UTF-8 支持
     if sys.platform == "win32":
         sys.stdin.reconfigure(encoding="utf-8", errors="replace")
@@ -100,6 +110,7 @@ async def main():
     parser.add_argument("--api-key", default="", help="API Key")
     parser.add_argument("--config", default="", help="配置文件路径")
     parser.add_argument("--verbose", "-v", action="store_true", help="详细日志")
+    parser.add_argument("--json-logs", action="store_true", help="JSON 格式日志（生产环境）")
     parser.add_argument("--one-shot", "-s", default="", help="单次执行（非交互）")
     parser.add_argument("--legacy", action="store_true", help="使用旧版 REPL")
     args = parser.parse_args()
@@ -243,6 +254,8 @@ async def main():
     # PromptBuilder — 动态 prompt 片段组装
     import os as _os_cwd
     _cwd = _os_cwd.getcwd()
+    import platform as _platform
+    _os_name = _platform.system()
     prompt_builder = PromptBuilder()
     prompt_builder.set_system_prompt(
         f"你是 my-agent，一个来自 Empire code 开源项目的可控多智能体自迭代 AI Agent 框架。"
@@ -255,7 +268,7 @@ async def main():
         f"请用中文回答用户的问题。当被问到你的身份时，如实说明你是 my-agent 框架，运行在 {model} 模型上。"
         f"\n\n重要环境信息："
         f"\n- 当前工作目录: {_cwd}"
-        f"\n- 操作系统: Windows"
+        f"\n- 操作系统: {_os_name}"
         f"\n- 使用工具时请用绝对路径或基于工作目录的相对路径"
         f"\n- 不要运行需要用户交互式输入的程序（如 input()），改为接受命令行参数或用管道输入"
     )
@@ -363,7 +376,7 @@ async def main():
             f"请用中文回答用户的问题。当被问到你的身份时，如实说明你是 my-agent 框架，运行在 {model} 模型上。"
             f"\n\n重要环境信息："
             f"\n- 当前工作目录: {_cwd}"
-            f"\n- 操作系统: Windows"
+            f"\n- 操作系统: {_os_name}"
             f"\n- 使用工具时请用绝对路径或基于工作目录的相对路径"
             f"\n- 不要运行需要用户交互式输入的程序（如 input()），改为接受命令行参数或用管道输入"
         ),
