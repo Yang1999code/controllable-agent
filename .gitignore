@@ -4,21 +4,26 @@ __pycache__/
 *.egg-info/
 dist/
 *.egg
+build/
 
 # Virtual env
 venv/
 .venv/
+env/
+.conda/
 
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
+*~
 
 # Testing
 .pytest_cache/
 .coverage
 htmlcov/
+coverage.xml
 
 # OS
 .DS_Store
@@ -33,3 +38,9 @@ Thumbs.db
 
 # Config with secrets (use agent.yaml.example as template)
 app/config/agent.yaml
+
+# Docker
+*.log
+
+# Documentation (optional, can be generated)
+*.pdf
