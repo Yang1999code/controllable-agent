@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>my-agent — 多智能体协作框架</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script>tailwind.config={theme:{extend:{colors:{app:{bg:'#080b11',surface:'#111620',elevated:'#181d2a',border:'#1e2533',accent:'#8b5cf6','accent-hover':'#a78bfa',text:'#e8eaef',muted:'#6b7280',green:'#10b981',red:'#ef4444',orange:'#f59e0b',yellow:'#fbbf24',blue:'#3b82f6',cyan:'#06b6d4',pink:'#ec4899'}}}}}}</script>
+<style>
+*{font-family:'Inter','Noto Sans SC',sans-serif}body{background:#080b11;color:#e8eaef}
+::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#1e2533;border-radius:2px}
+.fade-in{animation:fadeIn .3s ease-out}@keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+.pulse{animation:pulse 2s infinite}@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.agent-node{transition:all .5s ease;cursor:default}.agent-node.active{filter:drop-shadow(0 0 12px var(--glow)) brightness(1.3)}.agent-node.done{opacity:.85}
+.connection-line{stroke-dasharray:6 4;animation:dash .8s linear infinite;opacity:.35}.connection-line.active{stroke-dasharray:0;opacity:.9;animation:none}@keyframes dash{to{stroke-dashoffset:-10}}
+.pixel{width:6px;height:6px;border-radius:1px;display:inline-block;transition:all .3s}
+.pixel.on{box-shadow:0 0 3px currentColor}.pixel.off{background:transparent!important}
+.stream-cursor::after{content:'▊';animation:blink 1s step-end infinite;color:#8b5cf6}@keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
+pre{white-space:pre-wrap;word-wrap:break-word;background:#080b11;padding:12px;border-radius:8px;border:1px solid #1e2533;font-size:12px;line-height:1.5;overflow-x:auto}
+.loading-dots::after{content:'';animation:loadingDots 1.5s infinite}@keyframes loadingDots{0%,20%{content:'.'}40%{content:'..'}60%,100%{content:'...'}}
+[x-cloak]{display:none!important}
+</style>
+</head>
+<body class="h-screen flex flex-col antialiased" x-data="app()">
+
+<!-- Header -->
+<header class="border-b border-app-border bg-app-surface/90 backdrop-blur-sm shrink-0 z-20">
+  <div class="px-5 py-3 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <div class="w-8 h-8 rounded-lg bg-app-accent/20 flex items-center justify-center text-base">&#9672;</div>
+      <div><h1 class="text-sm font-bold text-white">my-agent</h1><p class="text-xs text-app-muted">多智能体协作框架</p></div>
+    </div>
+    <div class="flex items-center gap-3 text-xs text-app-muted">
+      <span id="status-indicator" class="flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-app-green pulse"></span>就绪</span>
+      <span class="bg-app-elevated px-2 py-1 rounded-md" x-text="model"></span>
+    </div>
+  </div>
+</header>
+
+<!-- Body -->
+<div class="flex-1 flex overflow-hidden">
+
+  <!-- LEFT: Chat (flex-1) -->
+  <div class="flex-1 flex flex-col min-w-0 border-r border-app-border">
+    <div class="flex-1 overflow-y-auto px-5 py-4 space-y-4" id="chat-scroll" x-ref="chatScroll">
+      <!-- Welcome -->
+      <div x-show="chat.length===0 && !thinking" class="flex flex-col items-center justify-center h-full text-center">
+        <div class="text-5xl mb-5 opacity-20">&#10041;</div>
+        <h2 class="text-base font-semibold text-white mb-2">my-agent 已就绪</h2>
+        <p class="text-sm text-app-muted max-w-sm mb-5">5 个 AI Agent 分工协作<br>右侧面板实时展示协作流程</p>
+        <div class="flex flex-wrap justify-center gap-2">
+          <button @click="quickAsk('帮我写一个 Python 文本统计工具，统计字符数、词数、行数')" class="text-xs bg-app-surface border border-app-border hover:border-app-accent/40 text-app-muted hover:text-app-text px-3.5 py-2 rounded-xl transition-all">写文本统计工具</button>
+          <button @click="quickAsk('解释一下 RESTful API 的设计原则')" class="text-xs bg-app-surface border border-app-border hover:border-app-accent/40 text-app-muted hover:text-app-text px-3.5 py-2 rounded-xl transition-all">RESTful API 设计</button>
+          <button @click="quickAsk('帮我设计一个简单的用户登录系统架构')" class="text-xs bg-app-surface border border-app-border hover:border-app-accent/40 text-app-muted hover:text-app-text px-3.5 py-2 rounded-xl transition-all">设计登录系统</button>
+        </div>
+      </div>
+
+      <!-- Messages -->
+      <template x-for="(m,i) in chat" :key="i">
+        <div :class="m.role==='user'?'flex justify-end':'flex justify-start'" class="fade-in">
+          <div :class="m.role==='user'?'bg-app-accent text-white max-w-[75%] rounded-2xl rounded-br-md':'bg-app-surface border border-app-border max-w-[82%] rounded-2xl rounded-bl-md'" class="px-4 py-3 text-sm">
+            <div class="flex items-center gap-2 mb-1">
+              <span class="text-xs font-semibold opacity-70" x-text="m.role==='user'?'你':'my-agent'"></span>
+              <span x-show="m.tools&&m.tools.length" class="text-xs text-app-yellow" x-text="m.tools.join(', ')"></span>
+            </div>
+            <div class="whitespace-pre-wrap leading-relaxed" x-html="m.content||'&nbsp;'"></div>
+            <div x-show="m.done" class="flex items-center gap-2 text-xs text-app-green mt-3 pt-3 border-t border-app-border">
+              <span>&#10003;</span>完成 · turns:<span x-text="m.turns||'-'"></span>· 工具:<span x-text="m.toolCount||'0'"></span>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <!-- Streaming -->
+      <div x-show="thinking" class="flex justify-start fade-in">
+        <div class="bg-app-surface border border-app-accent/20 max-w-[82%] rounded-2xl rounded-bl-md px-4 py-3 text-sm">
+          <div class="flex items-center gap-2 mb-1"><span class="text-xs font-semibold opacity-70">my-agent</span><span x-show="currentTools.length" class="text-xs text-app-yellow" x-text="currentTools.join(', ')"></span></div>
+          <div class="whitespace-pre-wrap leading-relaxed"><span x-text="streamText"></span><span x-show="streamText" class="stream-cursor"></span><span x-show="!streamText" class="text-app-muted"><span class="loading-dots">思考中</span></span></div>
+        </div>
+      </div>
+
+      <div x-show="errorMsg" class="flex justify-center"><div class="bg-app-red/10 border border-app-red/30 rounded-xl px-4 py-2.5 text-sm text-app-red" x-text="errorMsg"></div></div>
+    </div>
+    <!-- Input -->
+    <div class="border-t border-app-border px-5 py-3.5 bg-app-bg shrink-0">
+      <form @submit.prevent="sendMessage" class="flex gap-3">
+        <input x-model="chatInput" type="text" placeholder="描述你的任务，Agent 将自动协作..."
+          :disabled="thinking" class="flex-1 bg-white border border-app-border rounded-xl px-4 py-2.5 text-sm placeholder-app-muted focus:border-app-accent focus:ring-1 focus:ring-app-accent/30 focus:outline-none transition-all disabled:opacity-50" style="color:#111620;caret-color:#8b5cf6;">
+        <button type="submit" :disabled="thinking||!chatInput.trim()" class="bg-app-accent hover:bg-app-accent-hover disabled:opacity-40 disabled:cursor-not-allowed text-white px-5 py-2.5 rounded-xl text-sm font-medium transition-all flex items-center gap-2 shrink-0">发送<svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg></button>
+      </form>
+    </div>
+  </div>
+
+  <!-- RIGHT: Agent Panel -->
+  <aside class="w-[420px] shrink-0 flex flex-col overflow-y-auto bg-app-bg/50">
+    <!-- Section: Collaboration Graph -->
+    <div class="px-4 pt-4 pb-2 border-b border-app-border">
+      <h3 class="text-xs font-semibold text-app-muted uppercase tracking-wider mb-3 flex items-center gap-2">
+        <svg class="w-3.5 h-3.5 text-app-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2v4m0 12v4m10-10h-4M6 12H2"/></svg>
+        智能体协作拓扑
+      </h3>
+      <div class="flex justify-center">
+        <svg viewBox="0 0 340 280" class="w-full max-w-[340px]" style="height:220px">
+          <defs>
+            <marker id="arrowhead" markerWidth="6" markerHeight="4" refX="6" refY="2" orient="auto"><polygon points="0 0,6 2,0 4" fill="#374151"/></marker>
+            <filter id="glow-active"><feGaussianBlur stdDeviation="3" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+          </defs>
+          <!-- Edges -->
+          <!-- Coordinator -> Planner -->
+          <line x1="170" y1="52" x2="170" y2="92" :class="'connection-line '+(agents.coordinator==='active'||agents.planner==='active'?'active':'')" stroke="#a78bfa" stroke-width="2"/>
+          <!-- Planner -> Coder -->
+          <line x1="170" y1="135" x2="85" y2="175" :class="'connection-line '+(agents.coder==='active'?'active':'')" stroke="#60a5fa" stroke-width="2"/>
+          <!-- Planner -> Reviewer -->
+          <line x1="170" y1="135" x2="255" y2="175" :class="'connection-line '+(agents.reviewer==='active'?'active':'')" stroke="#60a5fa" stroke-width="2"/>
+          <!-- Coder -> Reviewer -->
+          <line x1="95" y1="195" x2="235" y2="195" :class="'connection-line '+(agents.reviewer==='active'&&agents.coder==='done'?'active':'')" stroke="#fbbf24" stroke-width="2"/>
+          <!-- Coder -> Memorizer -->
+          <line x1="95" y1="210" x2="150" y2="250" :class="'connection-line '+(agents.memorizer==='active'?'active':'')" stroke="#f472b6" stroke-width="2"/>
+          <!-- Reviewer -> Memorizer -->
+          <line x1="245" y1="210" x2="190" y2="250" :class="'connection-line '+(agents.memorizer==='active'?'active':'')" stroke="#f472b6" stroke-width="2"/>
+
+          <!-- Nodes -->
+          <!-- Coordinator (top center) -->
+          <g :class="'agent-node '+(agents.coordinator==='active'?'active':agents.coordinator==='done'?'done':'')" style="--glow:#a78bfa" transform="translate(128,8)">
+            <rect x="0" y="0" width="84" height="44" rx="14" :fill="agents.coordinator==='active'?'#3c2866':agents.coordinator==='done'?'#1a2820':'#181d2a'" :stroke="agents.coordinator==='active'?'#a78bfa':agents.coordinator==='done'?'#10b981':'#1e2533'" stroke-width="1.5"/>
+            <text x="42" y="20" text-anchor="middle" fill="#a78bfa" font-size="10" font-weight="700">Coordinator</text>
+            <text x="42" y="33" text-anchor="middle" :fill="agents.coordinator==='done'?'#10b981':'#6b7280'" font-size="8" x-text="agents.coordinator==='active'?'工作中...':agents.coordinator==='done'?'已完成':'调度者'"></text>
+          </g>
+
+          <!-- Planner -->
+          <g :class="'agent-node '+(agents.planner==='active'?'active':agents.planner==='done'?'done':'')" style="--glow:#60a5fa" transform="translate(128,92)">
+            <rect x="0" y="0" width="84" height="44" rx="14" :fill="agents.planner==='active'?'#1e3050':agents.planner==='done'?'#1a2820':'#181d2a'" :stroke="agents.planner==='active'?'#60a5fa':agents.planner==='done'?'#10b981':'#1e2533'" stroke-width="1.5"/>
+            <text x="42" y="20" text-anchor="middle" fill="#60a5fa" font-size="10" font-weight="700">Planner</text>
+            <text x="42" y="33" text-anchor="middle" :fill="agents.planner==='done'?'#10b981':'#6b7280'" font-size="8" x-text="agents.planner==='active'?'规划中...':agents.planner==='done'?'已完成':'规划者'"></text>
+          </g>
+
+          <!-- Coder (bottom left) -->
+          <g :class="'agent-node '+(agents.coder==='active'?'active':agents.coder==='done'?'done':'')" style="--glow:#22d3ee" transform="translate(8,168)">
+            <rect x="0" y="0" width="84" height="44" rx="14" :fill="agents.coder==='active'?'#0d3338':agents.coder==='done'?'#1a2820':'#181d2a'" :stroke="agents.coder==='active'?'#22d3ee':agents.coder==='done'?'#10b981':'#1e2533'" stroke-width="1.5"/>
+            <text x="42" y="20" text-anchor="middle" fill="#22d3ee" font-size="10" font-weight="700">Coder</text>
+            <text x="42" y="33" text-anchor="middle" :fill="agents.coder==='done'?'#10b981':'#6b7280'" font-size="8" x-text="agents.coder==='active'?'编码中...':agents.coder==='done'?'已完成':'编码者'"></text>
+          </g>
+
+          <!-- Reviewer (bottom right) -->
+          <g :class="'agent-node '+(agents.reviewer==='active'?'active':agents.reviewer==='done'?'done':'')" style="--glow:#fbbf24" transform="translate(248,168)">
+            <rect x="0" y="0" width="84" height="44" rx="14" :fill="agents.reviewer==='active'?'#3d3010':agents.reviewer==='done'?'#1a2820':'#181d2a'" :stroke="agents.reviewer==='active'?'#fbbf24':agents.reviewer==='done'?'#10b981':'#1e2533'" stroke-width="1.5"/>
+            <text x="42" y="20" text-anchor="middle" fill="#fbbf24" font-size="10" font-weight="700">Reviewer</text>
+            <text x="42" y="33" text-anchor="middle" :fill="agents.reviewer==='done'?'#10b981':'#6b7280'" font-size="8" x-text="agents.reviewer==='active'?'审查中...':agents.reviewer==='done'?'已完成':'审查者'"></text>
+          </g>
+
+          <!-- Memorizer (bottom center) -->
+          <g :class="'agent-node '+(agents.memorizer==='active'?'active':agents.memorizer==='done'?'done':'')" style="--glow:#f472b6" transform="translate(128,238)">
+            <rect x="0" y="0" width="84" height="36" rx="14" :fill="agents.memorizer==='active'?'#351828':agents.memorizer==='done'?'#1a2820':'#181d2a'" :stroke="agents.memorizer==='active'?'#f472b6':agents.memorizer==='done'?'#10b981':'#1e2533'" stroke-width="1.5"/>
+            <text x="42" y="18" text-anchor="middle" fill="#f472b6" font-size="10" font-weight="700">Memorizer</text>
+            <text x="42" y="30" text-anchor="middle" :fill="agents.memorizer==='done'?'#10b981':'#6b7280'" font-size="8" x-text="agents.memorizer==='active'?'提取中...':agents.memorizer==='done'?'已完成':'记忆者'"></text>
+          </g>
+        </svg>
+      </div>
+      <!-- Legend -->
+      <div class="flex items-center justify-center gap-4 text-xs text-app-muted pb-2">
+        <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-app-accent pulse"></span>工作中</span>
+        <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-app-green"></span>已完成</span>
+        <span class="flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-app-border"></span>等待</span>
+      </div>
+    </div>
+
+    <!-- Section: Agent Cards with Pixel Avatars + Summaries -->
+    <div class="px-4 py-3 space-y-2.5 flex-1">
+      <h3 class="text-xs font-semibold text-app-muted uppercase tracking-wider mb-1">智能体详情</h3>
+
+      <!-- Coordinator Card -->
+      <div :class="'rounded-xl p-3 transition-all duration-500 border '+(agents.coordinator==='active'?'bg-app-accent/5 border-app-accent/40':agents.coordinator==='done'?'bg-app-green/5 border-app-green/30':'bg-app-surface border-app-border opacity-60')">
+        <div class="flex items-start gap-3">
+          <!-- Pixel Avatar: Coordinator (crown/purple) -->
+          <div class="shrink-0 grid grid-cols-8 gap-px" style="width:48px;height:48px">
+            <template x-for="(px,j) in pixels.coordinator" :key="j">
+              <div :class="'pixel '+(px?'on':'off')" :style="px?{background:'#a78bfa',color:'#a78bfa'}:{}"></div>
+            </template>
+          </div>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2 mb-0.5">
+              <span class="text-xs font-bold text-[#a78bfa]">Coordinator</span>
+              <span :class="'text-xs '+(agents.coordinator==='done'?'text-app-green':'text-app-muted')" x-text="agents.coordinator==='active'?'调度中':agents.coordinator==='done'?'已完成':'等待'"></span>
+            </div>
+            <p class="text-xs text-app-muted leading-relaxed" x-text="summaries.coordinator || '多Agent调度与流程监控'"></p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Planner Card -->
+      <div :class="'rounded-xl p-3 transition-all duration-500 border '+(agents.planner==='active'?'bg-app-blue/5 border-app-blue/40':agents.planner==='done'?'bg-app-green/5 border-app-green/30':'bg-app-surface border-app-border opacity-60')">
+        <div class="flex items-start gap-3">
+          <div class="shrink-0 grid grid-cols-8 gap-px" style="width:48px;height:48px">
+            <template x-for="(px,j) in pixels.planner" :key="j">
+              <div :class="'pixel '+(px?'on':'off')" :style="px?{background:'#60a5fa',color:'#60a5fa'}:{}"></div>
+            </template>
+          </div>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2 mb-0.5"><span class="text-xs font-bold text-[#60a5fa]">Planner</span><span :class="'text-xs '+(agents.planner==='done'?'text-app-green':'text-app-muted')" x-text="agents.planner==='active'?'规划中':agents.planner==='done'?'已完成':'等待'"></span></div>
+            <p class="text-xs text-app-muted leading-relaxed" x-text="summaries.planner || '任务分解与步骤规划'"></p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Coder Card -->
+      <div :class="'rounded-xl p-3 transition-all duration-500 border '+(agents.coder==='active'?'bg-app-cyan/5 border-app-cyan/40':agents.coder==='done'?'bg-app-green/5 border-app-green/30':'bg-app-surface border-app-border opacity-60')">
+        <div class="flex items-start gap-3">
+          <div class="shrink-0 grid grid-cols-8 gap-px" style="width:48px;height:48px">
+            <template x-for="(px,j) in pixels.coder" :key="j">
+              <div :class="'pixel '+(px?'on':'off')" :style="px?{background:'#22d3ee',color:'#22d3ee'}:{}"></div>
+            </template>
+          </div>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2 mb-0.5"><span class="text-xs font-bold text-[#22d3ee]">Coder</span><span :class="'text-xs '+(agents.coder==='done'?'text-app-green':'text-app-muted')" x-text="agents.coder==='active'?'编码中':agents.coder==='done'?'已完成':'等待'"></span></div>
+            <p class="text-xs text-app-muted leading-relaxed" x-text="summaries.coder || '代码实现与文件操作'"></p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Reviewer Card -->
+      <div :class="'rounded-xl p-3 transition-all duration-500 border '+(agents.reviewer==='active'?'bg-app-orange/5 border-app-orange/40':agents.reviewer==='done'?'bg-app-green/5 border-app-green/30':'bg-app-surface border-app-border opacity-60')">
+        <div class="flex items-start gap-3">
+          <div class="shrink-0 grid grid-cols-8 gap-px" style="width:48px;height:48px">
+            <template x-for="(px,j) in pixels.reviewer" :key="j">
+              <div :class="'pixel '+(px?'on':'off')" :style="px?{background:'#fbbf24',color:'#fbbf24'}:{}"></div>
+            </template>
+          </div>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2 mb-0.5"><span class="text-xs font-bold text-[#fbbf24]">Reviewer</span><span :class="'text-xs '+(agents.reviewer==='done'?'text-app-green':'text-app-muted')" x-text="agents.reviewer==='active'?'审查中':agents.reviewer==='done'?'已完成':'等待'"></span></div>
+            <p class="text-xs text-app-muted leading-relaxed" x-text="summaries.reviewer || '代码审查与测试验证'"></p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Memorizer Card -->
+      <div :class="'rounded-xl p-3 transition-all duration-500 border '+(agents.memorizer==='active'?'bg-app-pink/5 border-app-pink/40':agents.memorizer==='done'?'bg-app-green/5 border-app-green/30':'bg-app-surface border-app-border opacity-60')">
+        <div class="flex items-start gap-3">
+          <div class="shrink-0 grid grid-cols-8 gap-px" style="width:48px;height:48px">
+            <template x-for="(px,j) in pixels.memorizer" :key="j">
+              <div :class="'pixel '+(px?'on':'off')" :style="px?{background:'#f472b6',color:'#f472b6'}:{}"></div>
+            </template>
+          </div>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2 mb-0.5"><span class="text-xs font-bold text-[#f472b6]">Memorizer</span><span :class="'text-xs '+(agents.memorizer==='done'?'text-app-green':'text-app-muted')" x-text="agents.memorizer==='active'?'提取中':agents.memorizer==='done'?'已完成':'等待'"></span></div>
+            <p class="text-xs text-app-muted leading-relaxed" x-text="summaries.memorizer || '经验总结与知识提取'"></p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </aside>
+</div>
+
+<script>
+function app(){
+  // Pixel art designs (8x8 grid, 64 pixels each, 1=on 0=off)
+  const pixelDesigns = {
+    // Crown-wearing leader
+    coordinator: [0,0,0,1,1,0,0,0, 0,0,1,1,1,1,0,0, 0,1,1,0,0,1,1,0, 0,0,1,1,1,1,0,0, 0,0,0,1,1,0,0,0, 0,0,1,0,0,1,0,0, 0,1,0,0,0,0,1,0, 1,1,0,0,0,0,1,1],
+    // Glasses/thinking
+    planner:     [0,0,0,1,1,0,0,0, 0,0,1,1,1,1,0,0, 0,1,1,0,0,1,1,0, 0,0,1,1,1,1,0,0, 0,0,0,1,1,0,0,0, 0,1,1,0,0,1,1,0, 1,0,0,1,1,0,0,1, 0,0,0,1,1,0,0,0],
+    // Hoodie hacker
+    coder:       [0,0,0,1,1,0,0,0, 0,0,1,1,1,1,0,0, 0,1,1,0,0,1,1,0, 0,1,0,1,1,0,1,0, 0,0,1,0,0,1,0,0, 0,0,1,1,1,1,0,0, 0,1,1,0,0,1,1,0, 1,1,0,0,0,0,1,1],
+    // Magnifying glass
+    reviewer:    [0,0,0,1,1,0,0,0, 0,0,1,1,1,1,0,0, 0,1,1,0,0,1,1,0, 0,1,0,1,1,0,1,0, 0,0,1,0,0,1,0,0, 0,1,0,1,1,0,1,0, 1,0,0,0,0,0,0,1, 0,1,0,1,1,0,1,0],
+    // Brain/book
+    memorizer:   [0,0,0,1,1,0,0,0, 0,0,1,1,1,1,0,0, 0,1,1,0,0,1,1,0, 0,1,0,1,1,0,1,0, 0,0,1,1,1,1,0,0, 0,1,1,1,1,1,1,0, 1,1,0,1,1,0,1,1, 0,0,1,0,0,1,0,0]
+  };
+
+  return {
+    chat:[], chatInput:'', thinking:false, streamText:'', currentTools:[], errorMsg:'', model:'...',
+    agents:{coordinator:'waiting',planner:'waiting',coder:'waiting',reviewer:'waiting',memorizer:'waiting'},
+    summaries:{},
+    pixels: pixelDesigns,
+
+    async init(){
+      try{ const r=await fetch('/status'); const d=await r.json(); this.model=d.model||'?' }
+      catch(e){}
+    },
+
+    resetAgents(){ for(const k in this.agents) this.agents[k]='waiting'; this.summaries={}; },
+
+    quickAsk(msg){ this.chatInput=msg; this.sendMessage(); },
+
+    async sendMessage(){
+      const msg=this.chatInput.trim();
+      if(!msg||this.thinking) return;
+      this.chat.push({role:'user',content:msg});
+      this.chatInput=''; this.thinking=true; this.streamText=''; this.currentTools=[]; this.errorMsg=''; this.resetAgents();
+      this.$nextTick(()=>this.scrollToBottom());
+
+      try{
+        const resp=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg})});
+        if(!resp.ok){ this.errorMsg='HTTP '+resp.status; this.thinking=false; return; }
+        const reader=resp.body.getReader();
+        const decoder=new TextDecoder();
+        let buffer='';
+        // 预先收集的数据，思考结束后一次性推入 chat
+        let collectedContent=''; let collectedTools=[]; let collectedTurns=0; let collectedToolCount=0;
+
+        while(true){
+          const{value,done}=await reader.read();
+          if(done) break;
+          buffer+=decoder.decode(value,{stream:true});
+          const lines=buffer.split('\n');
+          buffer=lines.pop();
+          for(const line of lines){
+            if(!line.startsWith('data: ')) continue;
+            if(line.startsWith('data: :')) continue;
+            try{
+              const data=JSON.parse(line.slice(6));
+              switch(data.type){
+                case 'text':
+                  this.streamText+=data.content;
+                  break;
+                case 'tool_start':
+                  if(!this.currentTools.includes(data.tool)) this.currentTools.push(data.tool);
+                  break;
+                case 'agent':
+                  if(this.agents.hasOwnProperty(data.agent)) this.agents[data.agent]=data.status;
+                  break;
+                case 'stats':
+                  collectedTurns=data.turns;
+                  collectedToolCount=data.tools;
+                  break;
+                case 'summaries':
+                  this.summaries=data.data||{};
+                  break;
+                case 'error':
+                  this.errorMsg=data.message;
+                  break;
+                case 'done':
+                  if(collectedContent) break; // 防止重复 done
+                  collectedContent=this.streamText;
+                  collectedTools=[...this.currentTools];
+                  break;
+              }
+            }catch(e){}
+          }
+          this.$nextTick(()=>this.scrollToBottom());
+        }
+        // 思考结束，一次性推入完整消息
+        this.thinking=false;
+        this.chat.push({
+          role:'assistant',
+          content:collectedContent||this.streamText||'无响应',
+          tools:collectedTools,
+          turns:collectedTurns,
+          toolCount:collectedToolCount,
+          done:true
+        });
+        this.streamText=''; this.currentTools=[];
+        for(const k in this.agents){ if(this.agents[k]==='active') this.agents[k]='done'; }
+      }catch(e){ this.errorMsg='请求失败: '+e.message; this.thinking=false; }
+      this.$nextTick(()=>this.scrollToBottom());
+    },
+
+    scrollToBottom(){ const el=this.$refs.chatScroll; if(el) el.scrollTop=el.scrollHeight; }
+  };
+}
+</script>
+</body>
+</html>
