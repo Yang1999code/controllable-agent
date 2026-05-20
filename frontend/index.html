@@ -245,6 +245,14 @@ pre{white-space:pre-wrap;word-wrap:break-word;background:#080b11;padding:12px;bo
           <div class="flex-1 min-w-0">
             <div class="flex items-center gap-2 mb-0.5"><span class="text-xs font-bold text-[#f472b6]">Memorizer</span><span :class="'text-xs '+(agents.memorizer==='done'?'text-app-green':'text-app-muted')" x-text="agents.memorizer==='active'?'提取中':agents.memorizer==='done'?'已完成':'等待'"></span></div>
             <p class="text-xs text-app-muted leading-relaxed" x-text="summaries.memorizer || '经验总结与知识提取'"></p>
+            <!-- 记忆提取状态 -->
+            <div x-show="memoryStatus==='extracting'" class="mt-1.5 text-xs text-[#f472b6] flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-[#f472b6] pulse"></span>正在提取记忆...</div>
+            <div x-show="memoryStatus==='done'" class="mt-1.5 text-xs text-app-green flex items-center gap-1"><span>&#10003;</span><span x-text="memoryMsg"></span></div>
+            <div x-show="memoryStatus==='skipped'" class="mt-1.5 text-xs text-app-muted">记忆: 跳过</div>
+            <!-- 技能结晶状态 -->
+            <div x-show="skillStatus==='crystallizing'" class="mt-1 text-xs text-[#f472b6] flex items-center gap-1"><span class="w-2 h-2 rounded-full bg-[#f472b6] pulse"></span>正在提取技能...</div>
+            <div x-show="skillStatus==='done'" class="mt-1 text-xs text-app-green flex items-center gap-1"><span>&#10003;</span><span x-text="skillMsg"></span></div>
+            <div x-show="skillStatus==='skipped'" class="mt-1 text-xs text-app-muted">技能: 无可提取</div>
           </div>
         </div>
       </div>
@@ -272,6 +280,7 @@ function app(){
     chat:[], chatInput:'', thinking:false, streamText:'', currentTools:[], errorMsg:'', model:'...',
     agents:{coordinator:'waiting',planner:'waiting',coder:'waiting',reviewer:'waiting',memorizer:'waiting'},
     summaries:{},
+    memoryStatus:'', skillStatus:'', memoryMsg:'', skillMsg:'',
     pixels: pixelDesigns,
 
     async init(){
@@ -279,7 +288,7 @@ function app(){
       catch(e){}
     },
 
-    resetAgents(){ for(const k in this.agents) this.agents[k]='waiting'; this.summaries={}; },
+    resetAgents(){ for(const k in this.agents) this.agents[k]='waiting'; this.summaries={}; this.memoryStatus=''; this.skillStatus=''; this.memoryMsg=''; this.skillMsg=''; },
 
     quickAsk(msg){ this.chatInput=msg; this.sendMessage(); },
 
@@ -329,6 +338,16 @@ function app(){
                   break;
                 case 'error':
                   this.errorMsg=data.message;
+                  break;
+                case 'memory':
+                  this.memoryStatus=data.status;
+                  this.memoryMsg=data.message||'';
+                  if(data.status==='extracting') this.agents.memorizer='active';
+                  break;
+                case 'skill':
+                  this.skillStatus=data.status;
+                  this.skillMsg=data.message||'';
+                  if(data.status==='crystallizing') this.agents.memorizer='active';
                   break;
                 case 'done':
                   if(collectedContent) break; // 防止重复 done
