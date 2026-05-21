@@ -1,7 +1,7 @@
 """web_server.py — Web 前端服务。
 
 FastAPI + SSE 实时流式聊天 + 多智能体状态可视化
-+ Wiki 记忆提取 + 技能结晶。
++ Wiki 记忆提取 + 技能结晶 + MCP + 插件系统 + Prompt 组装。
 """
 
 import asyncio
@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from contextlib import asynccontextmanager
 
+import yaml
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
@@ -20,6 +21,12 @@ from my_agent import (
     Context, Message,
     ToolRegistry, HookChain,
     AgentLoop, AgentConfig, AgentResult,
+    FlowInspector, PromptBuilder,
+    CapabilityCatalog, CapabilityRegistry,
+    SkillRegistry,
+    MemoryStore, FactStore, DomainIndex,
+    TaskDetector, MemoryExtractor,
+    MCPServerConfig, MCPClient,
 )
 from app.providers import create_provider
 from app.tools import register_all_tools
@@ -37,24 +44,32 @@ _provider = None
 _tools: ToolRegistry | None = None
 _agent_busy = False
 
-# 记忆 + 技能
+# 记忆 + 技能 + MCP + 插件
 _memory_extractor = None
 _skill_crystallizer = None
 _skill_registry = None
+_mcp_clients: list = []
+_prompt_builder = None
+_inspector = None
+_capability_registry = None
+_web = None
+_plugin_adapter = None
 
 
 def get_config():
     return load_config(None)
 
 
-def build_agent_components():
+async def build_agent_components():
     global _loop, _context, _provider, _tools
     global _memory_extractor, _skill_crystallizer, _skill_registry
+    global _mcp_clients, _prompt_builder, _inspector, _capability_registry, _web, _plugin_adapter
 
     config = get_config()
     agent_cfg = config.get("agent", {})
     provider_cfg = get_provider_config(config, "")
 
+    # ── Provider ──────────────────────────────────────
     model = provider_cfg.get("model", "gpt-4o")
     base_url = provider_cfg.get("base_url", "")
     api_key = provider_cfg.get("api_key", "")
@@ -67,45 +82,150 @@ def build_agent_components():
     if base_url:
         provider_kwargs["base_url"] = base_url
     _provider = create_provider(provider_type, **provider_kwargs)
+    logger.info("Provider: %s / %s", provider_type, model)
 
+    # ── ToolRegistry ──────────────────────────────────
     _tools = ToolRegistry()
     _tools.max_result_chars = agent_cfg.get("max_tool_result_chars", 50000)
     register_all_tools(_tools)
 
-    loop_config = AgentConfig(
-        max_turns=agent_cfg.get("max_turns", 100),
-        max_tool_calls_per_turn=agent_cfg.get("max_tool_calls_per_turn", 15),
-        max_context_tokens=agent_cfg.get("max_context_tokens", 128000),
-    )
+    # ── MCP Server 连接 ───────────────────────────────
+    mcp_servers = config.get("mcp_servers", [])
+    if mcp_servers:
+        for srv in mcp_servers:
+            if not isinstance(srv, dict):
+                continue
+            if srv.get("disabled"):
+                continue
+            try:
+                mcp_config = MCPServerConfig(
+                    name=srv.get("name", "unnamed"),
+                    transport=srv.get("transport", "stdio"),
+                    command=srv.get("command", ""),
+                    args=srv.get("args", []),
+                    url=srv.get("url", ""),
+                    env=srv.get("env", {}),
+                )
+                mcp_client = MCPClient(mcp_config)
+                await mcp_client.connect()
+                for adapter in mcp_client.create_adapters():
+                    _tools.register(adapter)
+                _mcp_clients.append(mcp_client)
+                logger.info("MCP %s: %d tools", mcp_config.name, len(mcp_client.tool_names))
+            except ImportError:
+                logger.info("MCP %s: skipped (mcp package not installed)", srv.get("name", "?"))
+            except Exception as e:
+                logger.info("MCP %s: error — %s", srv.get("name", "?"), e)
 
-    _loop = AgentLoop(
-        provider=_provider,
-        tools=_tools,
-        hooks=HookChain(),
-        config=loop_config,
-    )
+    # MCP 自动发现: .agent-base/mcp/*.yaml
+    mcp_auto_dir = Path(".agent-base/mcp")
+    if mcp_auto_dir.exists():
+        for mcp_yaml in mcp_auto_dir.glob("*.yaml"):
+            try:
+                srv_cfg = yaml.safe_load(mcp_yaml.read_text(encoding="utf-8"))
+                if not isinstance(srv_cfg, dict) or srv_cfg.get("disabled"):
+                    continue
+                mcp_config = MCPServerConfig(
+                    name=srv_cfg.get("name", mcp_yaml.stem),
+                    transport=srv_cfg.get("transport", "stdio"),
+                    command=srv_cfg.get("command", ""),
+                    args=srv_cfg.get("args", []),
+                    url=srv_cfg.get("url", ""),
+                    env=srv_cfg.get("env", {}),
+                )
+                mcp_client = MCPClient(mcp_config)
+                await mcp_client.connect()
+                for adapter in mcp_client.create_adapters():
+                    _tools.register(adapter)
+                _mcp_clients.append(mcp_client)
+                logger.info("MCP %s (auto): %d tools", mcp_config.name, len(mcp_client.tool_names))
+            except ImportError:
+                logger.info("MCP %s (auto): skipped", mcp_yaml.stem)
+            except Exception as e:
+                logger.info("MCP %s (auto): error — %s", mcp_yaml.stem, e)
 
-    _context = Context(
-        system_prompt=(
-            f"你是 my-agent，一个多智能体协作框架。底层模型: {model}。"
-            f"你支持文件读写、Shell命令、搜索、网页抓取等工具。请用中文回答。"
-        ),
-        metadata={"agent_id": "main"},
-    )
-
-    # ── 记忆提取引擎装配 ──────────────────────────────
+    # ── 技能结晶器 ────────────────────────────────────
     try:
-        from agent.memory.store import MemoryStore
-        from agent.memory.fact_store import FactStore
-        from agent.memory.domain_index import DomainIndex
-        from agent.memory.task_detector import TaskDetector
-        from agent.memory.extractor import MemoryExtractor
+        _skill_registry = SkillRegistry()
+        from agent.crystallizer import SkillCrystallizer
+        _skill_crystallizer = SkillCrystallizer(_skill_registry)
+        loaded = _skill_crystallizer.load_existing_skills()
+        if loaded:
+            logger.info("已加载 %d 个结晶技能", loaded)
+    except Exception as e:
+        logger.debug("技能结晶器装配跳过: %s", e)
 
+    # ── Capability 渐进式披露 ─────────────────────────
+    catalog = CapabilityCatalog()
+    _capability_registry = CapabilityRegistry(catalog)
+    _capability_registry.register_capability(
+        "file_ops", "文件读写编辑", tier=0, source="builtin",
+        tools=["read", "write", "edit"],
+    )
+    _capability_registry.register_capability(
+        "shell", "Shell 命令执行", tier=0, source="builtin",
+        tools=["bash"],
+    )
+    _capability_registry.register_capability(
+        "search", "文件搜索 (glob/grep)", tier=0, source="builtin",
+        tools=["glob", "grep"],
+    )
+    _capability_registry.register_capability(
+        "web", "网页抓取/搜索/浏览器", tier=1, source="builtin",
+        tools=["web_fetch", "web_search", "web_browser_navigate",
+               "web_browser_click", "web_browser_type", "web_browser_snapshot"],
+    )
+    _capability_registry.register_capability(
+        "delegation", "多 Agent 委托与通信", tier=1, source="builtin",
+        tools=["delegate_task", "agent_message"],
+    )
+
+    # ── PromptBuilder ─────────────────────────────────
+    _cwd = os.getcwd()
+    _system_prompt = (
+        f"你是 my-agent，一个来自 Empire code 开源项目的可控多智能体自迭代 AI Agent 框架。"
+        f"你底层运行的模型是 {model}，通过 OpenAI 兼容 API 连接。"
+        f"你的能力包括：文件读写与搜索（read/write/edit/glob/grep）、"
+        f"Shell 命令执行（bash）、浏览器自动化（web_browser_*）、"
+        f"HTTP 请求（web_fetch）、网页搜索（web_search）、"
+        f"以及多 Agent 协作（delegate_task/agent_message）。"
+        f"你支持流式响应、工具调用、自动记忆管理。"
+        f"请用中文回答用户的问题。当被问到你的身份时，如实说明你是 my-agent 框架，运行在 {model} 模型上。"
+        f"\n\n重要环境信息："
+        f"\n- 当前工作目录: {_cwd}"
+        f"\n- 操作系统: Windows"
+        f"\n- 使用工具时请用绝对路径或基于工作目录的相对路径"
+        f"\n- 不要运行需要用户交互式输入的程序（如 input()），改为接受命令行参数或用管道输入"
+    )
+    _prompt_builder = PromptBuilder()
+    _prompt_builder.set_system_prompt(_system_prompt)
+
+    # ── FlowInspector ─────────────────────────────────
+    _inspector = FlowInspector()
+
+    # ── WebAutomation ─────────────────────────────────
+    try:
+        from agent.web import WebAutomation
+        _web = WebAutomation()
+    except Exception:
+        pass
+
+    # ── PluginAdapter ─────────────────────────────────
+    hooks = HookChain()
+    try:
+        from agent.plugin import PluginAdapter
+        _plugin_adapter = PluginAdapter(hooks, _tools, _skill_registry, catalog)
+    except Exception:
+        pass
+
+    # ── 记忆提取引擎 ──────────────────────────────────
+    try:
         memory_dir = os.path.expanduser("~/.agent-memory")
         os.makedirs(memory_dir, exist_ok=True)
         _memory_store = MemoryStore(memory_dir)
         _fact_store = FactStore(_memory_store)
         _domain_index = DomainIndex(_memory_store, _fact_store)
+        await _domain_index.initialize()
         _task_detector = TaskDetector()
         _memory_extractor = MemoryExtractor(
             provider=_provider,
@@ -117,18 +237,36 @@ def build_agent_components():
     except Exception as e:
         logger.debug("记忆提取装配跳过: %s", e)
 
-    # ── 技能结晶器装配 ─────────────────────────────────
-    try:
-        from agent.skill import SkillRegistry
-        from agent.crystallizer import SkillCrystallizer
+    # ── AgentLoop ─────────────────────────────────────
+    loop_config = AgentConfig(
+        max_turns=agent_cfg.get("max_turns", 100),
+        max_tool_calls_per_turn=agent_cfg.get("max_tool_calls_per_turn", 15),
+        max_context_tokens=agent_cfg.get("max_context_tokens", 128000),
+    )
 
-        _skill_registry = SkillRegistry()
-        _skill_crystallizer = SkillCrystallizer(_skill_registry)
-        loaded = _skill_crystallizer.load_existing_skills()
-        if loaded:
-            logger.info("已加载 %d 个结晶技能", loaded)
-    except Exception as e:
-        logger.debug("技能结晶器装配跳过: %s", e)
+    _loop = AgentLoop(
+        provider=_provider,
+        tools=_tools,
+        hooks=hooks,
+        config=loop_config,
+        prompt_builder=_prompt_builder,
+        inspector=_inspector,
+        capability_registry=_capability_registry,
+        memory_extractor=_memory_extractor,
+    )
+
+    _context = Context(
+        system_prompt=_system_prompt,
+        metadata={
+            "project_path": _cwd,
+            "_web": _web,
+            "_skill_registry": _skill_registry,
+            "_hooks": hooks,
+            "_memory_extractor": _memory_extractor,
+            "_skill_crystallizer": _skill_crystallizer,
+            "agent_id": "main",
+        },
+    )
 
     return _loop, _context
 
@@ -210,10 +348,16 @@ Agent 的完整输出: {agent_output[:3000]}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    build_agent_components()
+    await build_agent_components()
     FRONTEND_DIR.mkdir(exist_ok=True)
     logger.info("my-agent Web UI ready, model=%s", _provider.model if _provider else "?")
     yield
+    # 清理 MCP 连接
+    for client in _mcp_clients:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
 
 app = FastAPI(title="my-agent Web UI", version="0.2.0", lifespan=lifespan)
 
@@ -229,7 +373,19 @@ async def root():
 @app.get("/status")
 async def status():
     if _loop:
-        return {"model": _loop.model_name, "tools": _loop.tool_count, "ready": True}
+        mcp_info = []
+        for c in _mcp_clients:
+            mcp_info.append({"name": c.config.name, "tools": len(c.tool_names)})
+        return {
+            "model": _loop.model_name,
+            "tools": _loop.tool_count,
+            "mcp_servers": len(_mcp_clients),
+            "mcp_detail": mcp_info,
+            "memory": _memory_extractor is not None,
+            "skills": _skill_crystallizer is not None,
+            "plugins": _plugin_adapter is not None,
+            "ready": True,
+        }
     return {"ready": False}
 
 
