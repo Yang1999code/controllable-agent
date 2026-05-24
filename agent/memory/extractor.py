@@ -2,18 +2,22 @@
 
 任务完成后调用轻量模型提取 digest，积累到阈值时触发 wiki 合并。
 固定 system prompt 设计，KV Cache 友好。
+
+Phase 1.1: digest 提取时顺带提取实体和关系，写入 RelationStore。
 """
 
 import json
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime as dt
 
 from ai.types import Message
 from ai.provider import IModelProvider
 from agent.memory.fact_store import FactStore, FactEntry
 from agent.memory.domain_index import DomainIndex
 from agent.memory.task_detector import TaskDetector, TaskDetection
+from agent.memory.relation_store import RelationEntry
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +32,18 @@ _DIGEST_SYSTEM_PROMPT = """你是一个记忆提取助手。从对话历史中�
   "domains": ["conversation"],
   "tags": ["关键词1", "关键词2"],
   "facts": ["事实1", "事实2"],
-  "body": "## 任务摘要\\n\\n详细的 Markdown 摘要内容"
+  "body": "## 任务摘要\\n\\n详细的 Markdown 摘要内容",
+  "entities": [
+    {"name": "实体名", "type": "person|project|technology|organization|event|other"}
+  ],
+  "relations": [
+    {
+      "source": "源实体名（必须在 entities 列表中出现过）",
+      "target": "目标实体名（必须在 entities 列表中出现过）",
+      "relation": "关系类型，如 WORKS_ON, USES, CREATED_BY, BELONGS_TO, MANAGES",
+      "fact": "用自然语言描述这个关系"
+    }
+  ]
 }
 
 规则：
@@ -36,8 +51,11 @@ _DIGEST_SYSTEM_PROMPT = """你是一个记忆提取助手。从对话历史中�
 - tags 使用中文或英文均可，3-8 个
 - facts 是原子化的事实列表（每条一个独立事实）
 - body 是 Markdown 格式的完整摘要
-- 只提取有价值的事实，忽略寒暄和闲聊
-- 如果对话中没有有价值的信息，返回空 facts 数组"""
+- entities 只提取有明确指代的人、项目、技术、组织等实体，不要提取泛指概念
+- relations 的 source 和 target 必须来自 entities 列表中的 name
+- relations 只描述有明确信息支撑的关系，不要臆造
+- 如果对话中没有足够明确的实体或关系，对应字段返回空数组
+- 只提取有价值的事实，忽略寒暄和闲聊"""
 
 _WIKI_MERGE_SYSTEM_PROMPT = """你是一个知识合并助手。将多个任务摘要合并为一个完整的知识页。
 
@@ -74,9 +92,11 @@ class MemoryExtractor:
 
     工作流：
     1. TaskDetector 判断任务完成
-    2. 调用 LLM 提取 digest
+    2. 调用 LLM 提取 digest（含实体和关系）
     3. 积累阈值时触发 wiki 合并
-    4. 更新索引
+    4. 更新索引（含关系索引）
+
+    relation_store 为可选参数，不传则跳过关系索引（向后兼容）。
     """
 
     def __init__(
@@ -86,12 +106,14 @@ class MemoryExtractor:
         domain_index: DomainIndex,
         task_detector: TaskDetector | None = None,
         wiki_merge_threshold: int = _WIKI_MERGE_THRESHOLD,
+        relation_store=None,
     ):
         self.provider = provider
         self.fact_store = fact_store
         self.domain_index = domain_index
         self.task_detector = task_detector or TaskDetector()
         self.wiki_merge_threshold = wiki_merge_threshold
+        self._relation_store = relation_store
 
     async def check_and_extract(
         self,
@@ -181,6 +203,9 @@ class MemoryExtractor:
         )
 
         await self.domain_index.update_index_for(entry)
+
+        # ── 关系索引保存 ──
+        await self._save_relations(parsed, digest_id)
 
         # 检查是否需要 wiki 合并
         wiki_result = await self._check_and_merge_wiki(entry)
@@ -275,6 +300,9 @@ class MemoryExtractor:
         )
 
         await self.domain_index.update_index_for(entry)
+
+        # ── 关系索引保存 ──
+        await self._save_relations(parsed, digest_id)
 
         wiki_result = await self._check_and_merge_wiki(entry)
 
@@ -424,3 +452,50 @@ class MemoryExtractor:
                 except json.JSONDecodeError:
                     return None
             return None
+
+    async def _save_relations(self, parsed: dict, digest_id: str) -> None:
+        """从 LLM 解析结果中提取实体和关系，写入 RelationStore。
+
+        relation_store 为 None 时静默跳过（向后兼容）。
+        """
+        if self._relation_store is None:
+            return
+
+        entities = parsed.get("entities", [])
+        relations = parsed.get("relations", [])
+
+        if not relations:
+            return
+
+        entity_names = {e.get("name", "") for e in entities if isinstance(e, dict)}
+
+        valid_entries = []
+        for rel in relations:
+            if not isinstance(rel, dict):
+                continue
+            source = (rel.get("source") or "").strip()
+            target = (rel.get("target") or "").strip()
+            if not source or not target:
+                continue
+            valid_entries.append(
+                RelationEntry(
+                    source=source,
+                    target=target,
+                    relation=(rel.get("relation") or "RELATED_TO").strip(),
+                    fact=(rel.get("fact") or "").strip(),
+                    digest_ref=f"digest/{digest_id}.md",
+                    timestamp=dt.now().isoformat(),
+                )
+            )
+
+        if valid_entries:
+            try:
+                await self._relation_store.append_batch(valid_entries)
+                logger.debug(
+                    "saved %d relations from digest %s", len(valid_entries), digest_id
+                )
+            except Exception:
+                logger.debug(
+                    "relation save failed for digest %s (non-fatal)", digest_id,
+                    exc_info=True,
+                )

@@ -26,6 +26,7 @@ from my_agent import (
     SkillRegistry,
     MemoryStore, FactStore, DomainIndex,
     TaskDetector, MemoryExtractor,
+    RelationStore,
     MCPServerConfig, MCPClient,
 )
 from app.providers import create_provider
@@ -46,6 +47,7 @@ _agent_busy = False
 
 # 记忆 + 技能 + MCP + 插件
 _memory_extractor = None
+_relation_store = None
 _skill_crystallizer = None
 _skill_registry = None
 _mcp_clients: list = []
@@ -62,7 +64,7 @@ def get_config():
 
 async def build_agent_components():
     global _loop, _context, _provider, _tools
-    global _memory_extractor, _skill_crystallizer, _skill_registry
+    global _memory_extractor, _relation_store, _skill_crystallizer, _skill_registry
     global _mcp_clients, _prompt_builder, _inspector, _capability_registry, _web, _plugin_adapter
 
     config = get_config()
@@ -226,12 +228,14 @@ async def build_agent_components():
         _fact_store = FactStore(_memory_store)
         _domain_index = DomainIndex(_memory_store, _fact_store)
         await _domain_index.initialize()
+        _relation_store = RelationStore(_memory_store)
         _task_detector = TaskDetector()
         _memory_extractor = MemoryExtractor(
             provider=_provider,
             fact_store=_fact_store,
             domain_index=_domain_index,
             task_detector=_task_detector,
+            relation_store=_relation_store,
         )
         logger.info("记忆提取引擎已启用 (存储: %s)", memory_dir)
     except Exception as e:
@@ -382,6 +386,7 @@ async def status():
             "mcp_servers": len(_mcp_clients),
             "mcp_detail": mcp_info,
             "memory": _memory_extractor is not None,
+            "relations": bool(_relation_store),
             "skills": _skill_crystallizer is not None,
             "plugins": _plugin_adapter is not None,
             "ready": True,
@@ -476,89 +481,63 @@ async def chat(request: Request):
             # ── Agent 协作完成动画 ──────────────────────
             for who in ["planner", "coder", "reviewer"]:
                 await queue.put({"type": "agent", "agent": who, "status": "done"})
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.15)
             await queue.put({"type": "agent", "agent": "coordinator", "status": "done"})
 
             full_output = text_buffer
 
-            # ── Memorizer 记忆提取 ──────────────────────
+            # ── Memorizer 启动（前端亮图标，后台并行执行） ──
             await queue.put({"type": "agent", "agent": "memorizer", "status": "active"})
-            memory_result = None
-            if _memory_extractor and full_output:
-                try:
-                    await queue.put({"type": "memory", "status": "extracting"})
-                    msgs_for_memory = [
-                        Message(role="user", content=user_msg),
-                        Message(role="assistant", content=full_output),
-                    ]
-                    memory_result = await _memory_extractor.extract_digest(
-                        msgs_for_memory, session_id=f"web-{int(time.time())}"
-                    )
-                    if memory_result and memory_result.success:
-                        await queue.put({
-                            "type": "memory",
-                            "status": "done",
-                            "digest_id": memory_result.digest_id,
-                            "wiki_id": memory_result.wiki_id or "",
-                            "message": f"提取记忆 #{memory_result.digest_id}" +
-                                       (f" → Wiki {memory_result.wiki_id}" if memory_result.wiki_id else ""),
-                        })
-                        logger.info("记忆提取成功: digest=%s wiki=%s", memory_result.digest_id, memory_result.wiki_id or "-")
-                    else:
-                        reason = memory_result.reason if memory_result else "no_result"
-                        await queue.put({"type": "memory", "status": "skipped", "reason": reason})
-                except Exception as e:
-                    logger.debug("memory extraction failed: %s", e)
-                    await queue.put({"type": "memory", "status": "skipped", "reason": str(e)})
+            await queue.put({"type": "memory", "status": "extracting"})
 
-            # ── 技能结晶 ─────────────────────────────────
-            skill_result = None
-            if _skill_crystallizer and full_output:
-                try:
-                    await queue.put({"type": "skill", "status": "crystallizing"})
-                    skills = _skill_crystallizer.crystallize(full_output)
-                    if skills:
-                        skill_result = {"names": [s.name for s in skills], "count": len(skills)}
-                        await queue.put({
-                            "type": "skill",
-                            "status": "done",
-                            "skills": skill_result["names"],
-                            "count": skill_result["count"],
-                            "message": f"结晶 {len(skills)} 个技能: {', '.join(s.name for s in skills)}",
-                        })
-                        logger.info("技能结晶: %d 个 — %s", len(skills), skill_result["names"])
-                    else:
-                        await queue.put({"type": "skill", "status": "skipped", "reason": "未发现可提取技能"})
-                except Exception as e:
-                    logger.debug("skill crystallization failed: %s", e)
-                    await queue.put({"type": "skill", "status": "skipped", "reason": str(e)})
-
-            await queue.put({"type": "agent", "agent": "memorizer", "status": "done"})
-
-            # ── 各角色工作摘要 ──────────────────────────
-            summaries = await _generate_agent_summaries(user_msg, full_output)
-            if not summaries:
-                mem_msg = f"已提取本次对话经验，存入记忆系统"
-                if memory_result and memory_result.success:
-                    mem_msg = f"记忆 #{memory_result.digest_id} 已存储"
-                if skill_result and skill_result["count"] > 0:
-                    mem_msg += f"；结晶 {skill_result['count']} 个技能"
-                summaries = {
-                    "coordinator": f"调度完成: 协调了规划、编码、审查全流程",
-                    "planner": f"分析需求并拆解为可执行步骤",
-                    "coder": f"执行了核心实现，调用 {len(tool_names)} 个工具",
-                    "reviewer": f"验证了输出质量，确认结果符合要求",
-                    "memorizer": mem_msg,
-                }
-            else:
-                # 增强 memorizer 摘要
-                if memory_result and memory_result.success:
-                    summaries["memorizer"] = (summaries.get("memorizer", "") + f" [记忆 #{memory_result.digest_id}]").strip()
-                if skill_result and skill_result["count"] > 0:
-                    summaries["memorizer"] = (summaries.get("memorizer", "") + f" [技能 +{skill_result['count']}]").strip()
+            # 立即发送摘要和 done，不阻塞用户开始新对话
+            summaries = {
+                "coordinator": f"调度完成: 协调了规划、编码、审查全流程",
+                "planner": f"分析需求并拆解为可执行步骤",
+                "coder": f"执行了核心实现，调用 {len(tool_names)} 个工具",
+                "reviewer": f"验证了输出质量，确认结果符合要求",
+                "memorizer": "正在提取记忆...",
+            }
             await queue.put({"type": "summaries", "data": summaries})
-
             await queue.put({"type": "done"})
+
+            # ── 后台任务：记忆提取 + 技能结晶（不阻塞用户输入） ──
+            if _memory_extractor or _skill_crystallizer:
+
+                async def _bg_memorize():
+                    try:
+                        if _memory_extractor and full_output:
+                            try:
+                                msgs_for_memory = [
+                                    Message(role="user", content=user_msg),
+                                    Message(role="assistant", content=full_output),
+                                ]
+                                memory_result = await _memory_extractor.extract_digest(
+                                    msgs_for_memory, session_id=f"web-{int(time.time())}"
+                                )
+                                if memory_result and memory_result.success:
+                                    logger.info("记忆提取成功: digest=%s wiki=%s",
+                                                memory_result.digest_id,
+                                                memory_result.wiki_id or "-")
+                                else:
+                                    reason = memory_result.reason if memory_result else "no_result"
+                                    logger.debug("记忆提取跳过: %s", reason)
+                            except Exception as e:
+                                logger.debug("后台记忆提取异常: %s", e)
+
+                        if _skill_crystallizer and full_output:
+                            try:
+                                skills = _skill_crystallizer.crystallize(full_output)
+                                if skills:
+                                    logger.info("技能结晶: %d 个 — %s",
+                                                len(skills),
+                                                [s.name for s in skills])
+                            except Exception as e:
+                                logger.debug("后台技能结晶异常: %s", e)
+                    except Exception as e:
+                        logger.warning("后台记忆任务异常: %s", e)
+
+                asyncio.create_task(_bg_memorize())
         except Exception as e:
             logger.exception("agent task error")
             await queue.put({"type": "error", "message": f"Agent 运行错误: {e}"})

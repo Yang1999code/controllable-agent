@@ -757,19 +757,23 @@ class AgentRuntime(IAgentRuntime):
         )
         all_results.append(phase_d_result)
 
-        # Phase Memory: 统一记忆提取（orchestrate 完成后）
+        # Phase Memory: 统一记忆提取（后台任务，不阻塞 orchestrate 返回）
         if memory_extractor is not None:
-            try:
-                extraction = await memory_extractor.extract_from_orchestration(
-                    user_request=user_request,
-                    results=all_results,
-                    session_id=session_id,
-                )
-                if extraction.success:
-                    logger.info("orchestration memory extracted: digest=%s wiki=%s",
-                                extraction.digest_id, extraction.wiki_id)
-            except Exception as e:
-                logger.warning("orchestration memory extraction failed (non-fatal): %s", e)
+
+            async def _bg_orch_extract():
+                try:
+                    extraction = await memory_extractor.extract_from_orchestration(
+                        user_request=user_request,
+                        results=all_results,
+                        session_id=session_id,
+                    )
+                    if extraction.success:
+                        logger.info("orchestration memory extracted: digest=%s wiki=%s",
+                                    extraction.digest_id, extraction.wiki_id)
+                except Exception as e:
+                    logger.warning("orchestration memory extraction failed (non-fatal): %s", e)
+
+            asyncio.create_task(_bg_orch_extract())
 
         # Phase Skill: 技能结晶持久化
         if skill_crystallizer is not None:

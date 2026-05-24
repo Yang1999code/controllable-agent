@@ -26,6 +26,7 @@ from my_agent import (
     MCPServerConfig, MCPClient,
     MemoryStore, FactStore, DomainIndex,
     AgentStoreFactory, SharedSpace,
+    RelationStore,
     load_role_config, register_roles,
 )
 from app.providers import create_provider
@@ -284,6 +285,7 @@ async def main():
     try:
         from agent.memory.task_detector import TaskDetector
         from agent.memory.extractor import MemoryExtractor
+        from agent.memory.relation_store import RelationStore
         import os as _os
 
         memory_dir = _os.path.expanduser("~/.agent-memory")
@@ -294,12 +296,14 @@ async def main():
 
         await domain_index.initialize()
 
+        relation_store = RelationStore(memory_store)
         task_detector = TaskDetector()
         memory_extractor = MemoryExtractor(
             provider=provider,
             fact_store=fact_store,
             domain_index=domain_index,
             task_detector=task_detector,
+            relation_store=relation_store,
         )
         _safe_print(f"[记忆] 自动提取引擎已启用 (存储: {memory_dir})")
     except Exception as e:

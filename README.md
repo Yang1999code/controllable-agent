@@ -122,6 +122,33 @@ d_015.md ─┘
 
 **中文分词检索**：用 jieba 分词（"回文判断函数"拆成"回文"/"判断"/"函数"三个词建索引），没装 jieba 自动降级为每两个字一组。
 
+**关系图谱**（v1.1 新增）：digest 提取时顺带识别实体和关系，构建轻量级关系索引。
+
+```
+用户说："我用 Python 写了 pytest 测试"
+    ↓ LLM 提取
+entities: [{"name": "用户", "type": "person"}, 
+           {"name": "Python", "type": "technology"},
+           {"name": "pytest", "type": "technology"}]
+relations: [{"source": "用户", "target": "Python", "relation": "USES"},
+            {"source": "用户", "target": "pytest", "relation": "USES"},
+            {"source": "pytest", "target": "Python", "relation": "BASED_ON"}]
+    ↓ 写入 relations.jsonl
+{"source":"用户","target":"Python","relation":"USES","fact":"用户使用 Python 编程"}
+{"source":"用户","target":"pytest","relation":"USES","fact":"用户使用 pytest 写测试"}
+{"source":"pytest","target":"Python","relation":"BASED_ON","fact":"pytest 基于 Python"}
+```
+
+查询时可以从任意实体出发，找到所有相关联的信息：
+```
+输入"Python" → 找到 USES(Python)、BASED_ON(pytest→Python) 
+→ 返回关联的 digest/wiki 文档
+```
+
+这解决了传统关键词搜索的痛点：搜"测试"找不到"pytest"，搜"回文"找不到"双指针"。**关系索引把孤立的事实连成了网**。
+
+**零依赖、零架构变更**：全部基于 JSONL 文件，与现有 digest/wiki 系统完全兼容。`relations.jsonl` 损坏也不影响搜索功能，自动降级为关键词搜索。
+
 **存储位置**（人可直接打开看）：
 ```
 ~/.agent-memory/
@@ -506,14 +533,14 @@ confidence: 0.85
 
 **搜索记忆**：在对话中提问，Agent 会自动检索相关记忆。
 
-**记忆生命周期**：
+**记忆生命周期**（全部异步并行，不阻塞用户输入）：
 
 ```
-对话完成 → 自动提取 digest（任务摘要）
+对话完成 → 后台自动提取 digest + 实体关系（用户立即可以开始新对话）
     ↓ 积累 5+ 个同主题 digest
 自动合并为 wiki（知识页面，更完整）
     ↓ 下次遇到类似问题
-优先查 wiki → 查不到再查 digest → 都没有就不编造
+优先查 wiki → 查不到再查 digest（含关系图谱搜索）→ 都没有就不编造
 ```
 
 ### 6. 常用命令速查
@@ -584,6 +611,8 @@ confidence: 0.85
 - Web 工具 (fetch + search + browser navigate/click/type/snapshot)
 - Digest + Wiki 记忆存储引擎 + 倒排索引检索 (DomainIndex)
 - LLM 记忆提取引擎 (自动从对话提取 digest/wiki)
+- **实体关系图谱 (RelationStore) — 实体识别 + 关系边 + JSONL 索引**
+- **记忆提取全面异步化 — asyncio.create_task 后台任务，不阻塞用户输入**
 - 三层上下文压缩 (Prune -> Summary -> Emergency Truncation)
 
 ### Phase 3 -- 多 Agent + 自进化 (已完成)
@@ -616,6 +645,7 @@ confidence: 0.85
 - 子 Agent 超时 + 深度限制 (max_depth=2)
 - 跨 Agent 读取路径白名单 + `..` 穿越防护
 - API Key 不入库 (agent.yaml 在 .gitignore 中)
+- 关系索引损坏自动降级 (不影响关键词搜索)
 
 ---
 
@@ -623,7 +653,7 @@ confidence: 0.85
 
 ```bash
 pytest tests/ -v
-# 449 tests, 0 failures
+# 494 tests, 0 failures
 ```
 
 ---
@@ -634,6 +664,7 @@ pytest tests/ -v
 |------|------|
 | [多智能体设计.md](多智能体设计.md) | Phase 3 多 Agent 系统完整设计 |
 | [我的记忆改进.md](我的记忆改进.md) | Wiki 式记忆系统设计 |
+| [docs/memory-improvement-plan.md](docs/memory-improvement-plan.md) | 记忆系统优化计划 (含 Graphiti 对标 + Phase 1 实施) |
 | [多智能实现记录.md](多智能实现记录.md) | Phase 3 实现过程 (449 tests) |
 | [可视化.md](可视化.md) | 终端 UI 设计文档 |
 | [架构总结.md](架构总结.md) | 三层架构分析 |

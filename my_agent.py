@@ -42,6 +42,7 @@ from agent.memory.fact_store import FactStore, FactEntry
 from agent.memory.domain_index import DomainIndex, DomainEntry, IndexEntry
 from agent.memory.task_detector import TaskDetector, TaskDetection
 from agent.memory.extractor import MemoryExtractor, ExtractionResult
+from agent.memory.relation_store import RelationStore, RelationEntry
 from agent.memory.dedup import Deduplicator, DeduplicationResult, DuplicationVerdict
 
 # ── Phase 3 多 Agent 协作 ──────────────────────────────

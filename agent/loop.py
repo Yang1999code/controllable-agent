@@ -446,29 +446,33 @@ class AgentLoop:
             data={"result": result},
         ))
 
-        # 记忆提取（异步，不阻塞主循环返回）
+        # 记忆提取（后台异步任务，不阻塞主循环返回）
         if self.memory_extractor:
-            try:
-                session_id = context.metadata.get("session_id", uuid.uuid4().hex[:8])
-                extraction = await self.memory_extractor.check_and_extract(
-                    messages=context.messages,
-                    session_id=session_id,
-                    turn_count=turn_count,
-                    had_tool_calls=total_tool_calls > 0,
-                )
-                if extraction and extraction.success:
-                    logger.info(
-                        "memory extracted: digest=%s wiki=%s",
-                        extraction.digest_id, extraction.wiki_id,
+
+            async def _extract_memory():
+                try:
+                    session_id = context.metadata.get("session_id", uuid.uuid4().hex[:8])
+                    extraction = await self.memory_extractor.check_and_extract(
+                        messages=context.messages,
+                        session_id=session_id,
+                        turn_count=turn_count,
+                        had_tool_calls=total_tool_calls > 0,
                     )
-                    await self.hooks.fire(AgentEvent(
-                        type=AgentEventType.TASK_COMPLETE,
-                        data={
-                            "digest_id": extraction.digest_id,
-                            "wiki_id": extraction.wiki_id,
-                        },
-                    ))
-            except Exception as e:
-                logger.warning("memory extraction failed (non-fatal): %s", e)
+                    if extraction and extraction.success:
+                        logger.info(
+                            "memory extracted: digest=%s wiki=%s",
+                            extraction.digest_id, extraction.wiki_id,
+                        )
+                        await self.hooks.fire(AgentEvent(
+                            type=AgentEventType.TASK_COMPLETE,
+                            data={
+                                "digest_id": extraction.digest_id,
+                                "wiki_id": extraction.wiki_id,
+                            },
+                        ))
+                except Exception as e:
+                    logger.warning("memory extraction failed (non-fatal): %s", e)
+
+            asyncio.create_task(_extract_memory())
 
         return result
