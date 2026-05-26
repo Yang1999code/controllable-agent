@@ -21,6 +21,25 @@
 pre{white-space:pre-wrap;word-wrap:break-word;background:#080b11;padding:12px;border-radius:8px;border:1px solid #1e2533;font-size:12px;line-height:1.5;overflow-x:auto}
 .loading-dots::after{content:'';animation:loadingDots 1.5s infinite}@keyframes loadingDots{0%,20%{content:'.'}40%{content:'..'}60%,100%{content:'...'}}
 [x-cloak]{display:none!important}
+.settings-sidebar{width:96px;transition:all .2s}
+.settings-btn{display:flex;align-items:center;gap:8px;width:100%;height:36px;padding:0 12px;border-radius:8px;border:1px solid transparent;background:transparent;color:#6b7280;cursor:pointer;transition:all .15s;font-size:11px;white-space:nowrap}
+.settings-btn svg{width:16px;height:16px;flex-shrink:0}
+.settings-btn:hover{background:#181d2a;color:#e8eaef;border-color:#1e2533}
+.settings-btn.active{background:#1e3050;color:#8b5cf6;border-color:rgba(139,92,246,.3)}
+.settings-panel{width:340px;min-width:340px;overflow-y:auto;background:#0d1117;border-right:1px solid #1e2533;transition:all .2s}
+.settings-panel::-webkit-scrollbar{width:3px}
+.settings-panel .section-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#4b5563;padding:12px 16px 6px}
+.settings-panel .section-desc{font-size:12px;color:#6b7280;padding:0 16px 12px;line-height:1.55;border-bottom:1px solid #1e2533;margin-bottom:4px}
+.settings-panel .info-row{display:flex;justify-content:space-between;align-items:center;padding:9px 16px;font-size:13px}
+.settings-panel .info-row:hover{background:#111620}
+.settings-panel .info-label{color:#9ca3af}
+.settings-panel .info-value{color:#e8eaef;font-weight:500}
+.settings-panel .badge{font-size:11px;padding:3px 10px;border-radius:10px;font-weight:600}
+.settings-panel .badge-green{background:#064e3b;color:#10b981}
+.settings-panel .badge-purple{background:#3b1f6e;color:#a78bfa}
+.settings-panel .badge-blue{background:#1e3050;color:#60a5fa}
+.settings-panel .badge-muted{background:#111620;color:#6b7280}
+
 </style>
 </head>
 <body class="h-screen flex flex-col antialiased" x-data="app()">
@@ -42,7 +61,114 @@ pre{white-space:pre-wrap;word-wrap:break-word;background:#080b11;padding:12px;bo
 <!-- Body -->
 <div class="flex-1 flex overflow-hidden">
 
-  <!-- LEFT: Chat (flex-1) -->
+  <!-- ── Settings Sidebar + Panel (wrapper for click-away detection) ── -->
+  <div class="flex shrink-0" @click.away="sidebarOpen=false">
+    <!-- Icon Strip -->
+    <nav class="settings-sidebar bg-app-surface/80 border-r border-app-border flex flex-col items-center py-3 gap-0.5 px-2">
+      <button @click="toggleSidebar('config')" :class="'settings-btn '+(sidebarTab==='config'&&sidebarOpen?'active':'')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v2m0 18v2M4.22 4.22l1.42 1.42m12.72 12.72l1.42 1.42M1 12h2m18 0h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg><span>通用</span></button>
+      <button @click="toggleSidebar('model')" :class="'settings-btn '+(sidebarTab==='model'&&sidebarOpen?'active':'')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8m-4-4v4"/></svg><span>模型</span></button>
+      <button @click="toggleSidebar('tools')" :class="'settings-btn '+(sidebarTab==='tools'&&sidebarOpen?'active':'')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg><span>工具</span></button>
+      <button @click="toggleSidebar('mcp')" :class="'settings-btn '+(sidebarTab==='mcp'&&sidebarOpen?'active':'')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><path d="M6 6h.01M6 18h.01"/></svg><span>MCP</span></button>
+      <button @click="toggleSidebar('skills')" :class="'settings-btn '+(sidebarTab==='skills'&&sidebarOpen?'active':'')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg><span>技能</span></button>
+      <button @click="toggleSidebar('memory')" :class="'settings-btn '+(sidebarTab==='memory'&&sidebarOpen?'active':'')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg><span>记忆</span></button>
+    </nav>
+
+    <!-- Detail Panel -->
+    <div x-show="sidebarOpen" x-transition:enter="transition ease-out duration-200" x-transition:enter-start="opacity-0 -translate-x-2" x-transition:enter-end="opacity-100 translate-x-0" class="settings-panel">
+    <!-- 通用设置 -->
+    <template x-if="sidebarTab==='config'">
+      <div>
+        <div class="section-title">通用设置</div>
+        <div class="section-desc">控制 Agent 运行时核心参数：最大对话轮数、工具调用频率上限、上下文窗口大小等。这些参数直接影响 Agent 的执行深度和资源消耗。</div>
+        <div class="info-row"><span class="info-label">最大轮数</span><span class="info-value" x-text="panelData.max_turns||'-'"></span></div>
+        <div class="info-row"><span class="info-label">每轮最大工具调用</span><span class="info-value" x-text="panelData.max_tool_calls_per_turn||'-'"></span></div>
+        <div class="info-row"><span class="info-label">最大上下文 Token</span><span class="info-value" x-text="(panelData.max_context_tokens||0).toLocaleString()"></span></div>
+        <div class="info-row"><span class="info-label">工具结果上限 (字符)</span><span class="info-value" x-text="(panelData.max_tool_result_chars||0).toLocaleString()"></span></div>
+        <div class="section-title">运行状态</div>
+        <div class="info-row"><span class="info-label">模型</span><span class="info-value" x-text="model"></span></div>
+        <div class="info-row"><span class="info-label">就绪</span><span class="badge badge-green">是</span></div>
+      </div>
+    </template>
+    <!-- 模型 -->
+    <template x-if="sidebarTab==='model'">
+      <div>
+        <div class="section-title">模型信息</div>
+        <div class="section-desc">当前连接的大语言模型配置。Agent 所有推理、规划和代码生成能力均基于此模型。上下文窗口越大，单次对话可容纳的历史信息越多。</div>
+        <div class="info-row"><span class="info-label">当前模型</span><span class="info-value" x-text="panelData.model||'-'"></span></div>
+        <div class="info-row"><span class="info-label">Provider</span><span class="info-value" x-text="panelData.provider_type||'-'"></span></div>
+        <div class="info-row"><span class="info-label">Base URL</span><span class="info-value text-xs" x-text="panelData.base_url||'-'"></span></div>
+        <div class="info-row"><span class="info-label">上下文窗口</span><span class="info-value" x-text="panelData.context_window ? (panelData.context_window>=1e6?(panelData.context_window/1e6).toFixed(1)+'M':(panelData.context_window/1e3).toFixed(0)+'K') : '-'"></span></div>
+      </div>
+    </template>
+    <!-- 工具 -->
+    <template x-if="sidebarTab==='tools'">
+      <div>
+        <div class="section-title">内置工具 <span class="badge badge-blue ml-1" x-text="panelData.count||0"></span></div>
+        <div class="section-desc">Agent 与外部世界交互的能力基础。每个工具封装了一类操作（文件读写、命令执行、搜索等），Agent 在推理过程中按需选择调用。</div>
+        <template x-for="t in panelData.tools||[]" :key="t.name">
+          <div class="info-row"><span class="info-label" x-text="t.name"></span><span class="text-xs text-app-muted" x-text="t.description?.slice(0,30)||''"></span></div>
+        </template>
+      </div>
+    </template>
+    <!-- MCP -->
+    <template x-if="sidebarTab==='mcp'">
+      <div>
+        <div class="section-title">MCP 服务器 <span class="badge badge-purple ml-1" x-text="panelData.count||0"></span></div>
+        <div class="section-desc">Model Context Protocol — 开放协议，允许 Agent 接入外部数据源和第三方工具服务器。连接后可扩展 Agent 的能力边界，如数据库查询、API 网关等。</div>
+        <template x-if="(panelData.servers||[]).length===0">
+          <div class="info-row"><span class="text-xs text-app-muted">未连接 MCP 服务器</span></div>
+        </template>
+        <template x-for="s in panelData.servers||[]" :key="s.name">
+          <div class="info-row flex-col items-start gap-1">
+            <div class="flex justify-between w-full"><span class="text-xs font-semibold text-white" x-text="s.name"></span><span class="badge badge-green" x-text="s.transport"></span></div>
+            <div class="text-xs text-app-muted"><span x-text="s.tools"></span> 工具: <span x-text="s.tool_names?.join(', ')||''"></span></div>
+          </div>
+        </template>
+      </div>
+    </template>
+    <!-- 技能 -->
+    <template x-if="sidebarTab==='skills'">
+      <div>
+        <div class="section-title">技能 <span class="badge badge-purple ml-1" x-text="panelData.count||0"></span></div>
+        <div class="section-desc">从历史对话中自动结晶提取的可复用能力模块。每个技能包含触发条件、执行流程和质量评分，Agent 遇到匹配场景时自动激活。</div>
+        <template x-if="(panelData.skills||[]).length===0">
+          <div class="info-row"><span class="text-xs text-app-muted">暂无技能</span></div>
+        </template>
+        <template x-for="s in panelData.skills||[]" :key="s.name">
+          <div class="info-row flex-col items-start gap-1">
+            <div class="flex justify-between w-full"><span class="text-xs font-semibold text-white" x-text="s.name"></span><span class="badge badge-blue" x-text="Math.round(s.quality)+' 分'"></span></div>
+            <div class="text-xs text-app-muted" x-text="s.description||''"></div>
+          </div>
+        </template>
+      </div>
+    </template>
+    <!-- 记忆 -->
+    <template x-if="sidebarTab==='memory'">
+      <div>
+        <div class="section-title">记忆系统</div>
+        <div class="section-desc">Agent 的记忆分为三层：Digest（对话摘要归档）、Wiki（结构化知识页）、RelationStore（实体关系图谱）。记忆让 Agent 在多次对话间保持上下文连贯性。</div>
+        <div class="info-row"><span class="info-label">Digest 摘要</span><span class="info-value" x-text="panelData.digests||0"></span></div>
+        <div class="info-row"><span class="info-label">Wiki 知识页</span><span class="info-value" x-text="panelData.wikis||0"></span></div>
+        <div class="info-row"><span class="info-label">关系总数</span><span class="info-value" x-text="panelData.relations?.total_relations||0"></span></div>
+        <div class="info-row"><span class="info-label">实体数</span><span class="info-value" x-text="panelData.relations?.unique_entities||0"></span></div>
+        <div class="section-title">关系类型</div>
+        <div class="px-4 flex flex-wrap gap-1.5">
+          <template x-for="rt in panelData.relations?.relation_types||[]" :key="rt">
+            <span class="badge badge-purple" x-text="rt"></span>
+          </template>
+        </div>
+        <div class="section-title">域分类</div>
+        <div class="px-4 flex flex-wrap gap-1.5">
+          <template x-for="d in panelData.domains||[]" :key="d">
+            <span class="badge badge-muted" x-text="d"></span>
+          </template>
+        </div>
+      </div>
+    </template>
+  </div>
+  </div><!-- /settings wrapper -->
+
+  <!-- CENTER: Chat (flex-1) -->
   <div class="flex-1 flex flex-col min-w-0 border-r border-app-border">
     <div class="flex-1 overflow-y-auto px-5 py-4 space-y-4" id="chat-scroll" x-ref="chatScroll">
       <!-- Welcome -->
@@ -283,9 +409,25 @@ function app(){
     memoryStatus:'', skillStatus:'', memoryMsg:'', skillMsg:'',
     pixels: pixelDesigns,
 
+    // 设置面板
+    sidebarOpen: false,
+    sidebarTab: '',
+    panelData: {},
+
     async init(){
       try{ const r=await fetch('/status'); const d=await r.json(); this.model=d.model||'?' }
       catch(e){}
+    },
+
+    toggleSidebar(tab){
+      if(this.sidebarTab===tab&&this.sidebarOpen){this.sidebarOpen=false;return}
+      this.sidebarTab=tab; this.sidebarOpen=true; this.loadPanelData(tab);
+    },
+
+    async loadPanelData(tab){
+      this.panelData={};
+      const ep={config:'/api/settings/config',model:'/api/settings/model',tools:'/api/settings/tools',mcp:'/api/settings/mcp',skills:'/api/settings/skills',memory:'/api/settings/memory'};
+      try{const r=await fetch(ep[tab]);this.panelData=await r.json()}catch(e){this.panelData={}}
     },
 
     resetAgents(){ for(const k in this.agents) this.agents[k]='waiting'; this.summaries={}; this.memoryStatus=''; this.skillStatus=''; this.memoryMsg=''; this.skillMsg=''; },

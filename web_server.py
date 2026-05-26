@@ -48,6 +48,9 @@ _agent_busy = False
 # 记忆 + 技能 + MCP + 插件
 _memory_extractor = None
 _relation_store = None
+_memory_store = None
+_fact_store = None
+_domain_index = None
 _skill_crystallizer = None
 _skill_registry = None
 _mcp_clients: list = []
@@ -64,7 +67,8 @@ def get_config():
 
 async def build_agent_components():
     global _loop, _context, _provider, _tools
-    global _memory_extractor, _relation_store, _skill_crystallizer, _skill_registry
+    global _memory_extractor, _relation_store, _memory_store, _fact_store, _domain_index
+    global _skill_crystallizer, _skill_registry
     global _mcp_clients, _prompt_builder, _inspector, _capability_registry, _web, _plugin_adapter
 
     config = get_config()
@@ -579,6 +583,105 @@ async def chat(request: Request):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ── 设置面板 API ──────────────────────────────────────
+
+
+@app.get("/api/settings/model")
+async def settings_model():
+    config = get_config()
+    provider_cfg = get_provider_config(config, "")
+    win = None
+    if _provider:
+        try:
+            win = await _provider.discover_context_window()
+        except Exception:
+            pass
+    return {
+        "model": _loop.model_name if _loop else "?",
+        "context_window": win,
+        "provider_type": config.get("providers", {}).get("default", "openai_compat"),
+        "base_url": provider_cfg.get("base_url", ""),
+    }
+
+
+@app.get("/api/settings/tools")
+async def settings_tools():
+    if not _tools:
+        return {"tools": [], "count": 0}
+    items = []
+    for name, tool in _tools.tools.items():
+        items.append({
+            "name": name,
+            "description": getattr(tool, "description", "") or "",
+            "parameters": len(getattr(tool, "parameters", {}) or {}),
+        })
+    return {"tools": items, "count": len(items)}
+
+
+@app.get("/api/settings/mcp")
+async def settings_mcp():
+    items = []
+    for c in _mcp_clients:
+        items.append({
+            "name": c.config.name,
+            "transport": c.config.transport,
+            "tools": len(c.tool_names),
+            "tool_names": c.tool_names[:20],
+        })
+    return {"servers": items, "count": len(items)}
+
+
+@app.get("/api/settings/skills")
+async def settings_skills():
+    if not _skill_registry:
+        return {"skills": [], "count": 0}
+    skills = _skill_registry.list_all()
+    items = []
+    for s in skills:
+        items.append({
+            "name": s.name,
+            "description": s.description,
+            "trigger": getattr(s, "trigger_condition", "") or "",
+            "quality": getattr(s, "quality_score", 0) or 0,
+            "created_at": getattr(s, "created_at", 0) or 0,
+        })
+    return {"skills": items, "count": len(items)}
+
+
+@app.get("/api/settings/memory")
+async def settings_memory():
+    result = {"digests": 0, "wikis": 0, "relations": {}, "domains": []}
+    if _fact_store:
+        try:
+            result["digests"] = len(await _fact_store.list_ids("digest") or [])
+            result["wikis"] = len(await _fact_store.list_ids("wiki") or [])
+        except Exception:
+            pass
+    if _relation_store:
+        try:
+            result["relations"] = await _relation_store.stats()
+        except Exception:
+            pass
+    if _domain_index:
+        try:
+            result["domains"] = await _domain_index.list_domains()
+        except Exception:
+            pass
+    return result
+
+
+@app.get("/api/settings/config")
+async def settings_config():
+    config = get_config()
+    agent_cfg = config.get("agent", {})
+    return {
+        "max_turns": agent_cfg.get("max_turns", 100),
+        "max_tool_calls_per_turn": agent_cfg.get("max_tool_calls_per_turn", 15),
+        "max_context_tokens": agent_cfg.get("max_context_tokens", 128000),
+        "max_tool_result_chars": agent_cfg.get("max_tool_result_chars", 50000),
+    }
 
 
 if __name__ == "__main__":
