@@ -32,7 +32,7 @@
 
 ---
 
-## 两大创新
+## 三大创新
 
 ### 创新 1：5 角色分工的多 Agent 协作
 
@@ -219,9 +219,65 @@ SkillCrystallizer 扫描回复文本
 
 ---
 
+### 创新 3：图结构记忆 — 从"文件盒子"到"关联大脑"
+
+记忆系统的第三次演进（Phase 2/3）。之前的文件记忆系统像"一摞卡片"——每张卡片独立存放，知道内容但不知道卡片之间的关联。图记忆系统把卡片串成了"关系网"。
+
+**核心能力**：
+
+```
+传统关键词搜索：
+  搜"技术栈" → 搜不到"React" ← 因为 wiki 里写的是"前端选型 React"
+                        
+图记忆 BFS 遍历搜索：
+  搜"Alice → 项目" → Alice-[WORKS_ON]→ProjectX-[USES]→React → ✅ 完整答案
+  搜"PostgreSQL" → PostgreSQL-[USED_BY]→ProjectX-[WORKS_ON]→Alice → ✅ 找到所有关联合
+```
+
+**4 种存储后端，按需升级**：
+
+| 后端 | 类型 | 特点 | 何时用 |
+|------|------|------|--------|
+| **file** (默认) | 文件系统 JSONL | 零依赖，clone 即用 | 单用户、<10000 条关系 |
+| **Kuzu** | 嵌入式图数据库 | 零运维，本地文件存储，Cypher 查询 | 单机部署，需要图查询能力 |
+| **Neo4j** | 原生图数据库 | 生态成熟、可视化工具 (Bloom) | 生产环境，需要管理面板 |
+| **FalkorDB** | Redis 图数据库 | Docker 一键部署、低延迟 | 高并发场景 |
+
+一行配置切换后端：
+
+```yaml
+# app/config/agent.yaml
+memory:
+  graph_backend: kuzu  # file | kuzu | neo4j | falkordb
+```
+
+**社区检测（Louvain 聚类）**：自动发现实体群——硬编码的四域分类（conversation/profile/agent_view/task）不再够用。Louvain 算法在实体关系图上自动聚类，比如自动发现"前端技术栈群"（Alice + React + Vite）、"后端基础设施群"（Bob + PostgreSQL + Docker）。社区数量随数据动态增长，无需手动分类。
+
+**时间旅行查询**：事实不怕过时——每条关系边都有 `valid_at`（何时生效）和 `invalid_at`（何时失效）。问"项目 2025 年 12 月用了什么技术栈？"，Agent 只返回当时有效的事实，后来变更的自动过滤。旧事实不删除、不断链，保留完整历史。
+
+**多 Agent 共享知识图谱**：多个 Agent 实例读写同一个图数据库，共享实体和关系。Agent A 提取的"Alice 擅长 React"自动对 Agent B 可见，避免重复提取。每个 Agent 的贡献可追溯、可审计。
+
+**新增 API 端点**（Web 端实时可查）：
+
+| 端点 | 用途 |
+|------|------|
+| `GET /api/graph/stats` | 图统计（实体数、边数、类型分布） |
+| `GET /api/graph/search?q=` | 图搜索（实体 + 关系） |
+| `GET /api/graph/entity/{name}?depth=` | 实体关联查询（支持多跳） |
+| `GET /api/graph/bfs?start=&max_depth=` | BFS 子图遍历 |
+| `GET /api/graph/communities` | Louvain 社区检测结果 |
+| `GET /api/graph/temporal?entity=&at_time=` | 时间旅行查询 |
+| `GET /api/graph/shared` | 多 Agent 共享图谱状态 |
+
+**优雅降级**：图后端不可用 → 自动回退到文件后端；可选依赖未安装 → 自动跳过不报错；relations.jsonl 损坏 → 退化为关键词搜索。任何时候都能正常工作。
+
+详见 [docs/memory-improvement-plan.md](docs/memory-improvement-plan.md) 第 6-7 节。
+
+---
+
 ## 核心组件介绍
 
-你的 Agent 框架由 **13 个核心组件** 协同工作。下面用大白话一个一个说清楚：
+你的 Agent 框架由 **14 个核心组件** 协同工作。下面用大白话一个一个说清楚：
 
 ### 1. Provider — "大脑"
 
@@ -280,9 +336,13 @@ MCP（Model Context Protocol）让你给 Agent 插"外设"。Agent 原生只会�
 
 在工具执行前后插入自定义逻辑。比如：执行 Shell 命令前检查是不是危险操作、写完文件后自动格式化代码。你可以往链上加任意多个钩子。
 
+### 14. GraphBackend — "图案记忆脑"
+
+把 Agent 的记忆从"一摞独立卡片"升级成"一张关系网"。实体（人、项目、技术）变成图中的节点，它们之间的关系变成边。搜索时沿着边遍历，而不是靠关键词撞大运。支持 4 种存储后端从零依赖文件模式无缝升级到 Neo4j 生产集群。内置 Louvain 社区检测自动发现主题群、时间旅行查询追溯历史事实、多 Agent 共享图谱避免重复提取。
+
 ---
 
-**一句话总结**：Provider 是大脑，AgentLoop 是心脏，ToolRegistry 是工具箱，Context 是短期记忆，MCP 是外设接口，CapabilityRegistry 是标签系统，PromptBuilder 是开场白，FlowInspector 是行车记录仪，MemoryExtractor 是学习笔记，SkillCrystallizer 是技能提炼器，PluginAdapter 是插件商店，WebAutomation 是浏览器手，HookChain 是拦截器。十三个组件各司其职，拼出了一个完整的多智能体框架。
+**一句话总结**：Provider 是大脑，AgentLoop 是心脏，ToolRegistry 是工具箱，Context 是短期记忆，MCP 是外设接口，CapabilityRegistry 是标签系统，PromptBuilder 是开场白，FlowInspector 是行车记录仪，MemoryExtractor 是学习笔记，SkillCrystallizer 是技能提炼器，PluginAdapter 是插件商店，WebAutomation 是浏览器手，HookChain 是拦截器，GraphBackend 是图案记忆脑。十四个组件各司其职，拼出了一个完整的多智能体框架。
 
 ---
 
@@ -324,7 +384,8 @@ app/         ← CLI + 15 内置工具 + 模型适配器 + 配置 + TUI
 | **IDiscovery** | 自动发现 | 预留 V2 |
 | **IMultiModelOrchestrator** | 多模型协同 | 预留 V3 |
 | **IPluginMarketplace** | 插件市场 | 预留 V3 |
-| **IMetaAgent** | 元 Agent 自优化 | 预留 V4 |
+| **IGraphBackend** | 图记忆存储 (File/Neo4j/FalkorDB/Kuzu 4 种后端) | V4 |
+| **IMetaAgent** | 元 Agent 自优化 | 预留 V5 |
 
 ### 15 内置工具
 
@@ -633,6 +694,18 @@ confidence: 0.85
 - 多 Agent 状态面板
 - 上下文占用% 实时计算 + 压缩通知
 
+### Phase 4 -- 图结构记忆系统 (已完成)
+- **4 种图后端** — `FileGraphBackend`（零依赖默认）/ `KuzuGraphBackend`（嵌入式）/ `Neo4jGraphBackend`（生产级）/ `FalkorDBGraphBackend`（Redis 图）
+- **图操作** — `add_entity` / `add_edge` / `add_episode` / `search_entities` / `search_edges` / `get_relations` / `bfs_traverse`
+- **工厂模式** — `create_graph_backend()` / `create_graph_backend_from_config()` 一行配置切换
+- **Louvain 社区检测** — 自动发现实体群，替代硬编码四域分类
+- **双时序模型** — `valid_at` / `invalid_at` 时间追踪，支持时间旅行查询 (at_time / time_range)
+- **多 Agent 共享图谱** — `SharedGraphManager` + `GraphSync`，跨 Agent 知识复用、贡献可追溯
+- **Web API** — 7 个图操作端点 (`/api/graph/*`)，实时可查
+- **优雅降级** — 图后端不可用 → 自动回退文件模式；驱动未安装 → 静默跳过
+- **并发安全** — `asyncio.Lock` 保护所有读写路径，双字典缓存 (`_by_id` / `_by_name`)
+- **工具循环修复** — `force_final_text` 机制：工具调用达到上限后强制 LLM 产出纯文本总结
+
 ---
 
 ## 安全网
@@ -646,6 +719,8 @@ confidence: 0.85
 - 跨 Agent 读取路径白名单 + `..` 穿越防护
 - API Key 不入库 (agent.yaml 在 .gitignore 中)
 - 关系索引损坏自动降级 (不影响关键词搜索)
+- 图后端不可用自动回退文件模式 (4 级降级：配置后端 → 环境变量 → Kuzu 尝试 → file 默认)
+- 工具调用超限后强制 LLM 产出文本总结 (force_final_text 机制)
 
 ---
 
@@ -664,7 +739,7 @@ pytest tests/ -v
 |------|------|
 | [多智能体设计.md](多智能体设计.md) | Phase 3 多 Agent 系统完整设计 |
 | [我的记忆改进.md](我的记忆改进.md) | Wiki 式记忆系统设计 |
-| [docs/memory-improvement-plan.md](docs/memory-improvement-plan.md) | 记忆系统优化计划 (含 Graphiti 对标 + Phase 1 实施) |
+| [docs/memory-improvement-plan.md](docs/memory-improvement-plan.md) | 记忆系统全规划 (含 Graphiti 对标 + Phase 1-3 实施记录) |
 | [多智能实现记录.md](多智能实现记录.md) | Phase 3 实现过程 (449 tests) |
 | [可视化.md](可视化.md) | 终端 UI 设计文档 |
 | [架构总结.md](架构总结.md) | 三层架构分析 |

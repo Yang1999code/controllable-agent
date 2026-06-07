@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 
 from my_agent import (
     Context, Message,
-    ToolRegistry, HookChain,
+    ToolRegistry, HookChain, HookHandler,
     AgentLoop, AgentConfig, AgentResult,
     FlowInspector, PromptBuilder,
     CapabilityCatalog, CapabilityRegistry,
@@ -28,6 +28,14 @@ from my_agent import (
     TaskDetector, MemoryExtractor,
     RelationStore,
     MCPServerConfig, MCPClient,
+    AgentEvent, AgentEventType,
+    # Phase 2/3 图记忆后端
+    create_graph_backend_from_config,
+    detect_available_backends,
+    IGraphBackend, FileGraphBackend,
+    CommunityDetector,
+    TemporalQueryEngine,
+    SharedGraphManager, GraphSync,
 )
 from app.providers import create_provider
 from app.tools import register_all_tools
@@ -60,6 +68,13 @@ _capability_registry = None
 _web = None
 _plugin_adapter = None
 
+# Phase 2/3 图记忆后端
+_graph_backend: IGraphBackend | None = None
+_community_detector: CommunityDetector | None = None
+_temporal_engine: TemporalQueryEngine | None = None
+_shared_graph: SharedGraphManager | None = None
+_graph_available_backends: list[str] = []
+
 
 def get_config():
     return load_config(None)
@@ -70,6 +85,7 @@ async def build_agent_components():
     global _memory_extractor, _relation_store, _memory_store, _fact_store, _domain_index
     global _skill_crystallizer, _skill_registry
     global _mcp_clients, _prompt_builder, _inspector, _capability_registry, _web, _plugin_adapter
+    global _graph_backend, _community_detector, _temporal_engine, _shared_graph, _graph_available_backends
 
     config = get_config()
     agent_cfg = config.get("agent", {})
@@ -245,6 +261,38 @@ async def build_agent_components():
     except Exception as e:
         logger.debug("记忆提取装配跳过: %s", e)
 
+    # ── Phase 2/3: 图记忆后端 ─────────────────────────
+    _graph_available_backends = detect_available_backends()
+    logger.info("可用图后端: %s", _graph_available_backends)
+
+    try:
+        _graph_backend = create_graph_backend_from_config(
+            config, store=_memory_store, relation_store=_relation_store,
+        )
+        await _graph_backend.initialize()
+        logger.info("图记忆后端已启用: %s (可用: %s)",
+                   _graph_backend.backend_name, _graph_available_backends)
+    except Exception as e:
+        logger.warning("图记忆后端初始化失败，使用文件后端: %s", e)
+        if _memory_store:
+            _graph_backend = FileGraphBackend(_memory_store, _relation_store)
+            await _graph_backend.initialize()
+        else:
+            _graph_backend = None
+
+    # Phase 3: 社区检测
+    _community_detector = CommunityDetector()
+    _temporal_engine = TemporalQueryEngine()
+
+    # Phase 3: 共享知识图谱（如果图后端可用）
+    if _graph_backend:
+        try:
+            _shared_graph = SharedGraphManager(_graph_backend)
+            await _shared_graph.initialize()
+            logger.info("共享知识图谱已启用")
+        except Exception as e:
+            logger.debug("共享知识图谱装配跳过: %s", e)
+
     # ── AgentLoop ─────────────────────────────────────
     loop_config = AgentConfig(
         max_turns=agent_cfg.get("max_turns", 100),
@@ -366,6 +414,17 @@ async def lifespan(app: FastAPI):
             await client.disconnect()
         except Exception:
             pass
+    # 清理图记忆后端
+    if _shared_graph:
+        try:
+            await _shared_graph.close()
+        except Exception:
+            pass
+    if _graph_backend:
+        try:
+            await _graph_backend.close()
+        except Exception:
+            pass
 
 app = FastAPI(title="my-agent Web UI", version="0.2.0", lifespan=lifespan)
 
@@ -393,6 +452,14 @@ async def status():
             "relations": bool(_relation_store),
             "skills": _skill_crystallizer is not None,
             "plugins": _plugin_adapter is not None,
+            "graph": {
+                "enabled": _graph_backend is not None,
+                "backend": _graph_backend.backend_name if _graph_backend else "none",
+                "available": _graph_available_backends,
+            },
+            "community_detection": _community_detector is not None,
+            "temporal_queries": _temporal_engine is not None,
+            "shared_graph": _shared_graph is not None,
             "ready": True,
         }
     return {"ready": False}
@@ -435,113 +502,136 @@ async def chat(request: Request):
 
     queue: asyncio.Queue = asyncio.Queue()
     agent_done = asyncio.Event()
-    agent_output = []
 
     async def run_agent_task():
-        """后台: 运行 Agent，把事件实时推入 queue。"""
+        """后台: 运行 Agent，通过 AgentLoop 把事件实时推入 queue。
+
+        ★ 关键修复: 使用 AgentLoop.run() 代替直接 _provider.stream()。
+        AgentLoop 的内层 tool_calls 循环会正确执行工具并把结果喂回 LLM，
+        从而解决「复杂问题只总结不回答」的 bug。
+        """
         try:
             await queue.put({"type": "thinking"})
             await queue.put({"type": "agent", "agent": "coordinator", "status": "active"})
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.15)
             await queue.put({"type": "agent", "agent": "planner", "status": "active"})
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.15)
             await queue.put({"type": "agent", "agent": "coder", "status": "active"})
             await queue.put({"type": "agent", "agent": "reviewer", "status": "active"})
 
-            if _context:
-                _context.messages.clear()
+            # ── 注册临时 hooks：将 AgentLoop 内部事件转发到 SSE queue ──
+            tool_names_seen: list[str] = []
 
-            # 流式调用 provider，逐 token 推送
-            from ai.types import Message as AIMessage
-            msgs = [AIMessage(role="user", content=user_msg)]
-            sys_prompt = _context.system_prompt if _context else ""
+            async def _on_stream_text(event: AgentEvent):
+                text = event.data.get("text", "")
+                await queue.put({"type": "text", "content": text})
 
-            tools_defs = [tool.definition for tool in _tools.tools.values()] if _tools else []
+            async def _on_tool_progress(event: AgentEvent):
+                tool_name = event.data.get("tool_name", "?")
+                status = event.data.get("status", "")
+                if status == "started" and tool_name not in tool_names_seen:
+                    tool_names_seen.append(tool_name)
+                    await queue.put({"type": "tool_start", "tool": tool_name})
 
-            text_buffer = ""
-            tool_names = []
-            async for event in _provider.stream(msgs, tools_defs, sys_prompt, max_tokens=4096):
-                if event.type == "text_delta":
-                    text_buffer += event.content
-                    await queue.put({"type": "text", "content": event.content})
-                elif event.type == "tool_call":
-                    if event.tool_name not in tool_names:
-                        tool_names.append(event.tool_name)
-                        await queue.put({
-                            "type": "tool_start",
-                            "tool": event.tool_name,
-                        })
-                elif event.type == "done":
-                    agent_output.append(text_buffer)
-                    await queue.put({
-                        "type": "stats",
-                        "turns": 1,
-                        "tools": len(tool_names),
-                        "model": _provider.model if _provider else "?",
-                    })
-                elif event.type == "error":
-                    await queue.put({"type": "error", "message": event.error})
+            h_text = HookHandler(
+                name="_web_stream_text", event_type=AgentEventType.STREAM_TEXT,
+                callback=_on_stream_text, priority=90,
+            )
+            h_tool = HookHandler(
+                name="_web_tool_progress", event_type=AgentEventType.TOOL_PROGRESS,
+                callback=_on_tool_progress, priority=90,
+            )
 
-            # ── Agent 协作完成动画 ──────────────────────
-            for who in ["planner", "coder", "reviewer"]:
-                await queue.put({"type": "agent", "agent": who, "status": "done"})
-                await asyncio.sleep(0.15)
-            await queue.put({"type": "agent", "agent": "coordinator", "status": "done"})
+            if _loop and _loop.hooks:
+                _loop.hooks.register(h_text)
+                _loop.hooks.register(h_tool)
 
-            full_output = text_buffer
+            try:
+                if _context:
+                    _context.messages.clear()
 
-            # ── Memorizer 启动（前端亮图标，后台并行执行） ──
-            await queue.put({"type": "agent", "agent": "memorizer", "status": "active"})
-            await queue.put({"type": "memory", "status": "extracting"})
+                # ★ 核心修复: 使用 AgentLoop.run() 代替直接 provider.stream()
+                # AgentLoop 正确实现了双层循环:
+                #   外层 followUp + 内层 tool_calls(执行工具→喂回LLM→继续)
+                result = await _loop.run(user_msg, _context)
 
-            # 立即发送摘要和 done，不阻塞用户开始新对话
-            summaries = {
-                "coordinator": f"调度完成: 协调了规划、编码、审查全流程",
-                "planner": f"分析需求并拆解为可执行步骤",
-                "coder": f"执行了核心实现，调用 {len(tool_names)} 个工具",
-                "reviewer": f"验证了输出质量，确认结果符合要求",
-                "memorizer": "正在提取记忆...",
-            }
-            await queue.put({"type": "summaries", "data": summaries})
-            await queue.put({"type": "done"})
+                full_output = result.final_output
+                turn_count = result.total_turns
+                tool_call_count = result.total_tool_calls
 
-            # ── 后台任务：记忆提取 + 技能结晶（不阻塞用户输入） ──
-            if _memory_extractor or _skill_crystallizer:
+                # Agent 完成动画
+                for who in ["planner", "coder", "reviewer"]:
+                    await queue.put({"type": "agent", "agent": who, "status": "done"})
+                    await asyncio.sleep(0.1)
+                await queue.put({"type": "agent", "agent": "coordinator", "status": "done"})
 
-                async def _bg_memorize():
-                    try:
-                        if _memory_extractor and full_output:
-                            try:
-                                msgs_for_memory = [
-                                    Message(role="user", content=user_msg),
-                                    Message(role="assistant", content=full_output),
-                                ]
-                                memory_result = await _memory_extractor.extract_digest(
-                                    msgs_for_memory, session_id=f"web-{int(time.time())}"
-                                )
-                                if memory_result and memory_result.success:
-                                    logger.info("记忆提取成功: digest=%s wiki=%s",
-                                                memory_result.digest_id,
-                                                memory_result.wiki_id or "-")
-                                else:
-                                    reason = memory_result.reason if memory_result else "no_result"
-                                    logger.debug("记忆提取跳过: %s", reason)
-                            except Exception as e:
-                                logger.debug("后台记忆提取异常: %s", e)
+                # 发送统计
+                await queue.put({
+                    "type": "stats",
+                    "turns": turn_count,
+                    "tools": tool_call_count,
+                    "model": _provider.model if _provider else "?",
+                })
 
-                        if _skill_crystallizer and full_output:
-                            try:
-                                skills = _skill_crystallizer.crystallize(full_output)
-                                if skills:
-                                    logger.info("技能结晶: %d 个 — %s",
-                                                len(skills),
-                                                [s.name for s in skills])
-                            except Exception as e:
-                                logger.debug("后台技能结晶异常: %s", e)
-                    except Exception as e:
-                        logger.warning("后台记忆任务异常: %s", e)
+                # ── Memorizer 启动 ──
+                await queue.put({"type": "agent", "agent": "memorizer", "status": "active"})
+                await queue.put({"type": "memory", "status": "extracting"})
 
-                asyncio.create_task(_bg_memorize())
+                # 摘要
+                summaries = {
+                    "coordinator": f"调度完成: 协调了规划、编码、审查全过程，共 {turn_count} 轮",
+                    "planner": f"分析需求并拆解为可执行步骤",
+                    "coder": f"执行核心实现，调用 {tool_call_count} 个工具",
+                    "reviewer": f"验证了输出质量，确认结果符合要求",
+                    "memorizer": "正在提取记忆...",
+                }
+                await queue.put({"type": "summaries", "data": summaries})
+                await queue.put({"type": "done"})
+
+                # ── 后台任务：记忆提取 + 技能结晶（不阻塞用户输入） ──
+                if _memory_extractor or _skill_crystallizer:
+
+                    async def _bg_memorize():
+                        try:
+                            if _memory_extractor and full_output:
+                                try:
+                                    msgs_for_memory = [
+                                        Message(role="user", content=user_msg),
+                                        Message(role="assistant", content=full_output),
+                                    ]
+                                    memory_result = await _memory_extractor.extract_digest(
+                                        msgs_for_memory, session_id=f"web-{int(time.time())}"
+                                    )
+                                    if memory_result and memory_result.success:
+                                        logger.info("记忆提取成功: digest=%s wiki=%s",
+                                                    memory_result.digest_id,
+                                                    memory_result.wiki_id or "-")
+                                    else:
+                                        reason = memory_result.reason if memory_result else "no_result"
+                                        logger.debug("记忆提取跳过: %s", reason)
+                                except Exception as e:
+                                    logger.debug("后台记忆提取异常: %s", e)
+
+                            if _skill_crystallizer and full_output:
+                                try:
+                                    skills = _skill_crystallizer.crystallize(full_output)
+                                    if skills:
+                                        logger.info("技能结晶: %d 个 — %s",
+                                                    len(skills),
+                                                    [s.name for s in skills])
+                                except Exception as e:
+                                    logger.debug("后台技能结晶异常: %s", e)
+                        except Exception as e:
+                            logger.warning("后台记忆任务异常: %s", e)
+
+                    asyncio.create_task(_bg_memorize())
+
+            finally:
+                # 清理临时 hooks，避免污染后续请求
+                if _loop and _loop.hooks:
+                    _loop.hooks.unregister("_web_stream_text")
+                    _loop.hooks.unregister("_web_tool_progress")
+
         except Exception as e:
             logger.exception("agent task error")
             await queue.put({"type": "error", "message": f"Agent 运行错误: {e}"})
@@ -682,6 +772,177 @@ async def settings_config():
         "max_context_tokens": agent_cfg.get("max_context_tokens", 128000),
         "max_tool_result_chars": agent_cfg.get("max_tool_result_chars", 50000),
     }
+
+
+# ── Phase 2/3: 图记忆 API ──────────────────────────────
+
+@app.get("/api/graph/stats")
+async def graph_stats():
+    """获取图记忆统计。"""
+    if not _graph_backend:
+        return {"error": "图记忆后端未启用"}
+    try:
+        stats = await _graph_backend.stats()
+        stats["available_backends"] = _graph_available_backends
+        return stats
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/graph/search")
+async def graph_search(q: str = "", top_k: int = 10):
+    """图搜索：实体 + 关系。"""
+    if not _graph_backend:
+        return {"error": "图记忆后端未启用"}
+    if not q:
+        return {"entities": [], "edges": [], "total": 0}
+    try:
+        entities = await _graph_backend.search_entities(q, top_k)
+        edges = await _graph_backend.search_edges(q, top_k)
+        return {
+            "entities": [
+                {"id": e.id, "name": e.name, "type": e.entity_type,
+                 "summary": e.summary[:200]} for e in entities
+            ],
+            "edges": [
+                {"source": e.source_name, "target": e.target_name,
+                 "relation": e.relation, "fact": e.fact} for e in edges
+            ],
+            "total": len(entities) + len(edges),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/graph/entity/{entity_name}")
+async def graph_entity(entity_name: str, depth: int = 1):
+    """获取实体及其关联。"""
+    if not _graph_backend:
+        return {"error": "图记忆后端未启用"}
+    try:
+        result = await _graph_backend.get_relations(entity_name, depth)
+        return {
+            "entities": [
+                {"id": e.id, "name": e.name, "type": e.entity_type} for e in result.entities
+            ],
+            "edges": [
+                {"source": e.source_name, "target": e.target_name,
+                 "relation": e.relation, "fact": e.fact} for e in result.edges
+            ],
+            "total": result.total_found,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/graph/bfs")
+async def graph_bfs(start: str = "", max_depth: int = 3, max_nodes: int = 50):
+    """BFS 子图遍历。"""
+    if not _graph_backend:
+        return {"error": "图记忆后端未启用"}
+    if not start:
+        return {"error": "start 参数必填"}
+    try:
+        result = await _graph_backend.bfs_traverse(start, max_depth, max_nodes)
+        return {
+            "entities": [
+                {"id": e.id, "name": e.name, "type": e.entity_type} for e in result.entities
+            ],
+            "edges": [
+                {"source": e.source_name, "target": e.target_name,
+                 "relation": e.relation, "fact": e.fact} for e in result.edges
+            ],
+            "total_nodes": len(result.entities),
+            "total_edges": len(result.edges),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/graph/communities")
+async def graph_communities():
+    """社区检测结果。"""
+    if not _community_detector or not _graph_backend:
+        return {"error": "社区检测未启用"}
+    try:
+        stats = await _graph_backend.stats()
+        if stats.get("total_entities", 0) == 0:
+            return {"communities": [], "total": 0, "message": "图中没有实体"}
+
+        # 获取所有实体和边
+        all_entities = await _graph_backend.search_entities("", 200)
+        all_edges = await _graph_backend.search_edges("", 500)
+
+        entity_names = [e.name for e in all_entities]
+        edge_tuples = [
+            (e.source_name, e.target_name, e.weight)
+            for e in all_edges
+            if e.source_name in entity_names and e.target_name in entity_names
+        ]
+
+        communities = await _community_detector.detect(entity_names, edge_tuples)
+
+        return {
+            "communities": [
+                {"id": c.id, "name": c.name, "size": c.size,
+                 "summary": c.summary,
+                 "top_entities": c.entities[:5]}
+                for c in communities
+            ],
+            "total": len(communities),
+            "algorithm": "louvain",
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/graph/temporal")
+async def graph_temporal(entity: str = "", at_time: str = ""):
+    """时间旅行查询。"""
+    if not _temporal_engine or not _graph_backend:
+        return {"error": "时间旅行查询未启用"}
+    if not entity:
+        return {"error": "entity 参数必填"}
+    try:
+        edges = await _graph_backend.search_edges(entity, 100)
+        if at_time:
+            entities = await _graph_backend.search_entities(entity, 10)
+            snapshot = await _temporal_engine.query_at_time(entities, edges, at_time)
+            return {
+                "at_time": at_time,
+                "entity_count": len(snapshot.entities),
+                "edge_count": len(snapshot.edges),
+                "edges": [
+                    {"source": e.source_name, "target": e.target_name,
+                     "relation": e.relation, "valid_at": e.valid_at,
+                     "invalid_at": e.invalid_at} for e in snapshot.edges
+                ],
+            }
+        else:
+            history = await _temporal_engine.get_entity_history(entity, edges)
+            return {"entity": entity, "history": history}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/graph/shared")
+async def graph_shared():
+    """共享知识图谱状态。"""
+    if not _shared_graph:
+        return {"error": "共享知识图谱未启用"}
+    try:
+        stats = await _shared_graph.get_shared_stats()
+        agents = await _shared_graph.list_contributing_agents()
+        return {
+            **stats,
+            "agents": [
+                {"id": a.agent_id, "entities": a.entity_count,
+                 "edges": a.edge_count, "last_active": a.last_active}
+                for a in agents
+            ],
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 
 if __name__ == "__main__":

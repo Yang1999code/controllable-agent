@@ -188,8 +188,9 @@ class AgentLoop:
             # ── 内层 tool_calls 循环 ──
             tool_call_count = 0
             had_tool_calls = False
+            force_final_text = False  # 工具超限后强制 LLM 产出一段纯文本总结
 
-            while tool_call_count < self.config.max_tool_calls_per_turn:
+            while tool_call_count < self.config.max_tool_calls_per_turn or force_final_text:
                 # LLM 调用
                 await self.hooks.fire(AgentEvent(
                     type=AgentEventType.LLM_CALL,
@@ -201,10 +202,14 @@ class AgentLoop:
                 llm_start = time.monotonic()
 
                 # 按 CapabilityRegistry 过滤可见工具
-                tool_defs = self.tools.get_definitions()
-                if self.capability_registry:
-                    visible_names = set(self.capability_registry.get_visible_tools())
-                    tool_defs = [d for d in tool_defs if d.name in visible_names]
+                # ★ force_final_text 模式: 不给工具，强制 LLM 产出纯文本总结
+                if force_final_text:
+                    tool_defs = []
+                else:
+                    tool_defs = self.tools.get_definitions()
+                    if self.capability_registry:
+                        visible_names = set(self.capability_registry.get_visible_tools())
+                        tool_defs = [d for d in tool_defs if d.name in visible_names]
 
                 # ── Phase 2/3: 上下文溢出检测 + 压缩 ──
                 tokens_used = count_total_tokens(
@@ -293,7 +298,9 @@ class AgentLoop:
                         role="assistant", content=current_text,
                         id=uuid.uuid4().hex[:12],
                     ))
-                    last_response_text = current_text
+                    if current_text:
+                        last_response_text = current_text
+                    # force_final_text 模式下空文本不覆盖已有的 last_response_text
                     break
 
                 had_tool_calls = True
@@ -376,6 +383,14 @@ class AgentLoop:
                         id=uuid.uuid4().hex[:12],
                     ))
 
+                # ★ 工具调用次数达到上限 → 下一轮强制纯文本总结
+                if tool_call_count >= self.config.max_tool_calls_per_turn and not force_final_text:
+                    force_final_text = True
+                    logger.warning(
+                        "max tool calls (%d/%d) reached, forcing final text-only summary",
+                        tool_call_count, self.config.max_tool_calls_per_turn,
+                    )
+
                 # ★ Phase 3：检查子Agent收件箱（Agent间通信）
                 if self.runtime:
                     agent_id = context.metadata.get("agent_id", "main")
@@ -424,8 +439,16 @@ class AgentLoop:
 
             # 如果模型被工具调用循环"卡住"，上限后立即退出
             if had_tool_calls and tool_call_count >= self.config.max_tool_calls_per_turn:
-                logger.warning(f"Max tool calls ({self.config.max_tool_calls_per_turn}) reached, forcing exit")
-                break
+                if force_final_text:
+                    # force_final_text 机制已触发 → LLM 已产出最终总结
+                    logger.info("force_final_text succeeded: LLM produced summary after %d tool calls",
+                                tool_call_count)
+                else:
+                    logger.warning(
+                        "Max tool calls (%d) reached without final text, forcing exit",
+                        self.config.max_tool_calls_per_turn,
+                    )
+                    break
 
             # 没有工具调用且有文本 → 完成
             break

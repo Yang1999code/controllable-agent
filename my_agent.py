@@ -45,6 +45,33 @@ from agent.memory.extractor import MemoryExtractor, ExtractionResult
 from agent.memory.relation_store import RelationStore, RelationEntry
 from agent.memory.dedup import Deduplicator, DeduplicationResult, DuplicationVerdict
 
+# ── Phase 2：图记忆后端 ─────────────────────────────────
+from agent.memory.graph_backend import (
+    GraphEntity, GraphEdge, GraphQueryResult,
+    IGraphBackend,
+    FileGraphBackend,
+    Neo4jGraphBackend,
+    FalkorDBGraphBackend,
+    KuzuGraphBackend,
+)
+from agent.memory.graph_factory import (
+    create_graph_backend,
+    create_graph_backend_from_config,
+    detect_available_backends,
+    BACKEND_TYPES,
+)
+
+# ── Phase 3：社区检测 + 时间旅行 + 共享图谱 ──────────────
+from agent.memory.community import (
+    Community, CommunityDetector, LabelPropagationDetector,
+)
+from agent.memory.temporal import (
+    TemporalSnapshot, TemporalQueryEngine, TemporalIndex,
+)
+from agent.memory.shared_graph import (
+    AgentContribution, SharedGraphManager, GraphSync,
+)
+
 # ── Phase 3 多 Agent 协作 ──────────────────────────────
 from agent.memory.agent_store_factory import AgentStoreFactory, AgentStores
 from agent.memory.shared_space import SharedSpace
@@ -88,6 +115,17 @@ __all__ = [
     "TaskDetector", "TaskDetection",
     "MemoryExtractor", "ExtractionResult",
     "Deduplicator", "DeduplicationResult", "DuplicationVerdict",
+    # phase 2 graph backend
+    "GraphEntity", "GraphEdge", "GraphQueryResult",
+    "IGraphBackend",
+    "FileGraphBackend", "Neo4jGraphBackend",
+    "FalkorDBGraphBackend", "KuzuGraphBackend",
+    "create_graph_backend", "create_graph_backend_from_config",
+    "detect_available_backends", "BACKEND_TYPES",
+    # phase 3 community + temporal + shared
+    "Community", "CommunityDetector", "LabelPropagationDetector",
+    "TemporalSnapshot", "TemporalQueryEngine", "TemporalIndex",
+    "AgentContribution", "SharedGraphManager", "GraphSync",
     # phase 3 multi-agent
     "AgentRuntime", "AgentTypeConfig", "SubAgentResult",
     "AgentStoreFactory", "AgentStores",
