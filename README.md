@@ -1,5 +1,9 @@
 # Controllable Agent
 
+<p align="center">
+  <img src="assets/cover.png" alt="Controllable Agent cover" width="100%" />
+</p>
+
 > 一个能自己组织团队、自己记忆、自己进化的 AI Agent 框架。
 > 5 个 Agent 角色分工协作 + Wiki 式记忆系统 + 实时终端可视化。
 
